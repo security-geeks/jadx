@@ -250,4 +250,17 @@ public class UiUtils {
 		SwingUtilities.convertPointFromScreen(pos, comp);
 		return pos;
 	}
+
+	public static String getEnvVar(String varName, String defValue) {
+		String envVal = System.getenv(varName);
+		if (envVal == null) {
+			return defValue;
+		}
+		return envVal;
+	}
+
+	public static void errorMessage(Component parent, String message) {
+		JOptionPane.showMessageDialog(parent, message,
+				NLS.str("message.errorTitle"), JOptionPane.ERROR_MESSAGE);
+	}
 }

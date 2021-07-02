@@ -64,6 +64,9 @@ public class JadxCLIArgs {
 	@Parameter(names = { "--no-inline-anonymous" }, description = "disable anonymous classes inline")
 	protected boolean inlineAnonymousClasses = true;
 
+	@Parameter(names = { "--no-inline-methods" }, description = "disable methods inline")
+	protected boolean inlineMethods = true;
+
 	@Parameter(names = "--no-replace-consts", description = "don't replace constant value with matching constant field")
 	protected boolean replaceConsts = true;
 
@@ -88,7 +91,7 @@ public class JadxCLIArgs {
 	)
 	protected String deobfuscationMapFile;
 
-	@Parameter(names = { "--deobf-rewrite-cfg" }, description = "force to save deobfuscation map")
+	@Parameter(names = { "--deobf-rewrite-cfg" }, description = "force to ignore and overwrite deobfuscation map file")
 	protected boolean deobfuscationForceSave = false;
 
 	@Parameter(names = { "--deobf-use-sourcename" }, description = "use source file name as class name alias")
@@ -99,11 +102,12 @@ public class JadxCLIArgs {
 
 	@Parameter(
 			names = { "--rename-flags" },
-			description = "what to rename, comma-separated,"
-					+ " 'case' for system case sensitivity,"
-					+ " 'valid' for java identifiers,"
-					+ " 'printable' characters,"
-					+ " 'none' or 'all' (default)",
+			description = "fix options (comma-separated list of): "
+					+ "\n 'case' - fix case sensitivity issues (according to --fs-case-sensitive option),"
+					+ "\n 'valid' - rename java identifiers to make them valid,"
+					+ "\n 'printable' - remove non-printable chars from identifiers,"
+					+ "\nor single 'none' - to disable all renames"
+					+ "\nor single 'all' - to enable all (default)",
 			converter = RenameConverter.class
 	)
 	protected Set<RenameEnum> renameFlags = EnumSet.allOf(RenameEnum.class);
@@ -120,18 +124,18 @@ public class JadxCLIArgs {
 	@Parameter(names = { "-f", "--fallback" }, description = "make simple dump (using goto instead of 'if', 'for', etc)")
 	protected boolean fallbackMode = false;
 
-	@Parameter(names = { "-v", "--verbose" }, description = "verbose output (set --log-level to DEBUG)")
-	protected boolean verbose = false;
-
-	@Parameter(names = { "-q", "--quiet" }, description = "turn off output (set --log-level to QUIET)")
-	protected boolean quiet = false;
-
 	@Parameter(
 			names = { "--log-level" },
 			description = "set log level, values: QUIET, PROGRESS, ERROR, WARN, INFO, DEBUG",
 			converter = LogHelper.LogLevelConverter.class
 	)
 	protected LogHelper.LogLevelEnum logLevel = LogHelper.LogLevelEnum.PROGRESS;
+
+	@Parameter(names = { "-v", "--verbose" }, description = "verbose output (set --log-level to DEBUG)")
+	protected boolean verbose = false;
+
+	@Parameter(names = { "-q", "--quiet" }, description = "turn off output (set --log-level to QUIET)")
+	protected boolean quiet = false;
 
 	@Parameter(names = { "--version" }, description = "print jadx version")
 	protected boolean printVersion = false;
@@ -215,9 +219,8 @@ public class JadxCLIArgs {
 		args.setDebugInfo(debugInfo);
 		args.setInsertDebugLines(addDebugLines);
 		args.setInlineAnonymousClasses(inlineAnonymousClasses);
-		args.setRenameCaseSensitive(isRenameCaseSensitive());
-		args.setRenameValid(isRenameValid());
-		args.setRenamePrintable(isRenamePrintable());
+		args.setInlineMethods(inlineMethods);
+		args.setRenameFlags(renameFlags);
 		args.setFsCaseSensitive(fsCaseSensitive);
 		return args;
 	}
@@ -272,6 +275,10 @@ public class JadxCLIArgs {
 
 	public boolean isInlineAnonymousClasses() {
 		return inlineAnonymousClasses;
+	}
+
+	public boolean isInlineMethods() {
+		return inlineMethods;
 	}
 
 	public boolean isDeobfuscationOn() {
@@ -360,7 +367,7 @@ public class JadxCLIArgs {
 			Set<RenameEnum> set = EnumSet.noneOf(RenameEnum.class);
 			for (String s : value.split(",")) {
 				try {
-					set.add(RenameEnum.valueOf(s.toUpperCase(Locale.ROOT)));
+					set.add(RenameEnum.valueOf(s.trim().toUpperCase(Locale.ROOT)));
 				} catch (IllegalArgumentException e) {
 					throw new IllegalArgumentException(
 							'\'' + s + "' is unknown for parameter " + paramName

@@ -35,6 +35,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
 import javax.swing.AbstractAction;
@@ -56,7 +59,6 @@ import javax.swing.JSplitPane;
 import javax.swing.JToggleButton;
 import javax.swing.JToolBar;
 import javax.swing.JTree;
-import javax.swing.ProgressMonitor;
 import javax.swing.SwingUtilities;
 import javax.swing.WindowConstants;
 import javax.swing.event.MenuEvent;
@@ -87,9 +89,11 @@ import jadx.core.utils.files.FileUtils;
 import jadx.gui.JadxWrapper;
 import jadx.gui.device.debugger.BreakpointManager;
 import jadx.gui.jobs.BackgroundExecutor;
-import jadx.gui.jobs.BackgroundWorker;
-import jadx.gui.jobs.DecompileJob;
-import jadx.gui.jobs.IndexJob;
+import jadx.gui.jobs.DecompileTask;
+import jadx.gui.jobs.ExportTask;
+import jadx.gui.jobs.IndexService;
+import jadx.gui.jobs.TaskStatus;
+import jadx.gui.plugins.quark.QuarkDialog;
 import jadx.gui.settings.JadxProject;
 import jadx.gui.settings.JadxSettings;
 import jadx.gui.settings.JadxSettingsWindow;
@@ -122,7 +126,6 @@ import static jadx.gui.utils.FileUtils.fileNamesToPaths;
 import static jadx.gui.utils.FileUtils.toPaths;
 import static javax.swing.KeyStroke.getKeyStroke;
 
-@SuppressWarnings("serial")
 public class MainWindow extends JFrame {
 	private static final Logger LOG = LoggerFactory.getLogger(MainWindow.class);
 
@@ -154,6 +157,7 @@ public class MainWindow extends JFrame {
 	private final transient JadxWrapper wrapper;
 	private final transient JadxSettings settings;
 	private final transient CacheObject cacheObject;
+	private final transient BackgroundExecutor backgroundExecutor;
 	private transient JadxProject project;
 	private transient Action newProjectAction;
 	private transient Action saveProjectAction;
@@ -177,8 +181,6 @@ public class MainWindow extends JFrame {
 
 	private transient Link updateLink;
 	private transient ProgressPanel progressPane;
-	private transient BackgroundWorker backgroundWorker;
-	private transient BackgroundExecutor backgroundExecutor;
 	private transient Theme editorTheme;
 
 	private JDebuggerPanel debuggerPanel;
@@ -196,10 +198,11 @@ public class MainWindow extends JFrame {
 		registerMouseNavigationButtons();
 		UiUtils.setWindowIcons(this);
 		loadSettings();
-		checkForUpdate();
-		newProject();
 
 		this.backgroundExecutor = new BackgroundExecutor(this);
+
+		checkForUpdate();
+		newProject();
 	}
 
 	public void init() {
@@ -376,28 +379,43 @@ public class MainWindow extends JFrame {
 	}
 
 	void open(List<Path> paths, Runnable onFinish) {
-		if (paths.size() == 1
-				&& paths.get(0).getFileName().toString().toLowerCase(Locale.ROOT).endsWith(JadxProject.PROJECT_EXTENSION)) {
-			openProject(paths.get(0));
-			onFinish.run();
-		} else {
-			project.setFilePath(paths);
-			clearTree();
-			BreakpointManager.saveAndExit();
-			if (paths.isEmpty()) {
+		if (paths.size() == 1) {
+			Path singleFile = paths.get(0);
+			if (singleFile.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(JadxProject.PROJECT_EXTENSION)) {
+				openProject(singleFile);
+				onFinish.run();
 				return;
 			}
-			backgroundExecutor.execute(NLS.str("progress.load"),
-					() -> wrapper.openFile(paths),
-					() -> {
-						deobfToggleBtn.setSelected(settings.isDeobfuscationOn());
-						initTree();
-						update();
-						runBackgroundJobs();
-						BreakpointManager.init(paths.get(0).getParent());
-						onFinish.run();
-					});
 		}
+		project.setFilePath(paths);
+		clearTree();
+		BreakpointManager.saveAndExit();
+		if (paths.isEmpty()) {
+			return;
+		}
+		backgroundExecutor.execute(NLS.str("progress.load"),
+				() -> wrapper.openFile(paths),
+				status -> {
+					if (status == TaskStatus.CANCEL_BY_MEMORY) {
+						showHeapUsageBar();
+						UiUtils.errorMessage(this, NLS.str("message.memoryLow"));
+						return;
+					}
+					onOpen(paths);
+					onFinish.run();
+				});
+	}
+
+	private void onOpen(List<Path> paths) {
+		deobfToggleBtn.setSelected(settings.isDeobfuscationOn());
+		initTree();
+		update();
+		runInitialBackgroundJobs();
+		BreakpointManager.init(paths.get(0).getParent());
+	}
+
+	private void addTreeCustomNodes() {
+		treeRoot.replaceCustomNode(ApkSignature.getApkSignature(wrapper));
 	}
 
 	private boolean ensureProjectIsSaved() {
@@ -469,35 +487,40 @@ public class MainWindow extends JFrame {
 		cacheObject.setJRoot(treeRoot);
 		cacheObject.setJadxSettings(settings);
 
-		int threadsCount = settings.getThreadsCount();
-		cacheObject.setDecompileJob(new DecompileJob(wrapper, threadsCount));
-		cacheObject.setIndexJob(new IndexJob(wrapper, cacheObject, threadsCount));
+		cacheObject.setIndexService(new IndexService(cacheObject));
 		cacheObject.setUsageInfo(new CodeUsageInfo(cacheObject.getNodeCache()));
 		cacheObject.setTextIndex(new TextSearchIndex(this));
 	}
 
-	synchronized void runBackgroundJobs() {
-		cancelBackgroundJobs();
-		backgroundWorker = new BackgroundWorker(cacheObject, progressPane);
+	synchronized void runInitialBackgroundJobs() {
 		if (settings.isAutoStartJobs()) {
 			new Timer().schedule(new TimerTask() {
 				@Override
 				public void run() {
-					backgroundWorker.exec();
+					waitDecompileTask();
 				}
 			}, 1000);
 		}
 	}
 
-	public synchronized void cancelBackgroundJobs() {
-		if (backgroundExecutor != null) {
-			backgroundExecutor.cancelAll();
+	private static final Object DECOMPILER_TASK_SYNC = new Object();
+
+	public void waitDecompileTask() {
+		synchronized (DECOMPILER_TASK_SYNC) {
+			try {
+				DecompileTask decompileTask = new DecompileTask(this, wrapper);
+				Future<TaskStatus> task = backgroundExecutor.execute(decompileTask);
+				task.get();
+			} catch (Exception e) {
+				LOG.error("Decompile task execution failed", e);
+			}
 		}
-		if (backgroundWorker != null) {
-			backgroundWorker.stop();
-			backgroundWorker = new BackgroundWorker(cacheObject, progressPane);
-			resetCache();
-		}
+	}
+
+	public void cancelBackgroundJobs() {
+		ExecutorService worker = Executors.newSingleThreadExecutor();
+		worker.execute(backgroundExecutor::cancelAll);
+		worker.shutdown();
 	}
 
 	public void reOpenFile() {
@@ -573,19 +596,18 @@ public class MainWindow extends JFrame {
 				decompilerArgs.setSkipResources(settings.isSkipResources());
 			}
 			settings.setLastSaveFilePath(fileChooser.getCurrentDirectory().toPath());
-			ProgressMonitor progressMonitor = new ProgressMonitor(mainPanel, NLS.str("msg.saving_sources"), "", 0, 100);
-			progressMonitor.setMillisToPopup(0);
-			wrapper.saveAll(fileChooser.getSelectedFile(), progressMonitor);
+			backgroundExecutor.execute(new ExportTask(this, wrapper, fileChooser.getSelectedFile()));
 		}
 	}
 
 	public void initTree() {
 		treeRoot = new JRoot(wrapper);
+		cacheObject.setJRoot(treeRoot);
 		treeRoot.setFlatPackages(isFlattenPackage);
 		treeModel.setRoot(treeRoot);
+		addTreeCustomNodes();
 		treeRoot.update();
 		reloadTree();
-		cacheObject.setJRoot(treeRoot);
 		cacheObject.setJadxSettings(settings);
 	}
 
@@ -666,14 +688,15 @@ public class MainWindow extends JFrame {
 				JResource res = (JResource) obj;
 				ResourceFile resFile = res.getResFile();
 				if (resFile != null && JResource.isSupportedForView(resFile.getType())) {
-					tabbedPane.showResource(res);
+					tabbedPane.showNode(res);
 				}
-			} else if (obj instanceof ApkSignature) {
-				tabbedPane.showSimpleNode((JNode) obj);
-			} else if (obj instanceof QuarkReport) {
-				tabbedPane.showSimpleNode((JNode) obj);
 			} else if (obj instanceof JNode) {
-				tabbedPane.codeJump(new JumpPosition((JNode) obj));
+				JNode node = (JNode) obj;
+				if (node.getRootClass() != null) {
+					tabbedPane.codeJump(new JumpPosition(node));
+				} else {
+					tabbedPane.showNode(node);
+				}
 			}
 		} catch (Exception e) {
 			LOG.error("Content loading error", e);
@@ -977,10 +1000,12 @@ public class MainWindow extends JFrame {
 		JMenu tools = new JMenu(NLS.str("menu.tools"));
 		tools.setMnemonic(KeyEvent.VK_T);
 		tools.add(deobfMenuItem);
-		tools.add(logAction);
+		tools.add(quarkAction);
+		tools.add(openDeviceAction);
 
 		JMenu help = new JMenu(NLS.str("menu.help"));
 		help.setMnemonic(KeyEvent.VK_H);
+		help.add(logAction);
 		help.add(aboutAction);
 
 		JMenuBar menuBar = new JMenuBar();
@@ -1020,14 +1045,12 @@ public class MainWindow extends JFrame {
 		toolbar.add(forwardAction);
 		toolbar.addSeparator();
 		toolbar.add(deobfToggleBtn);
+		toolbar.add(quarkAction);
+		toolbar.add(openDeviceAction);
 		toolbar.addSeparator();
 		toolbar.add(logAction);
 		toolbar.addSeparator();
 		toolbar.add(prefsAction);
-		toolbar.addSeparator();
-		toolbar.add(quarkAction);
-		toolbar.addSeparator();
-		toolbar.add(openDeviceAction);
 		toolbar.addSeparator();
 		toolbar.add(Box.createHorizontalGlue());
 		toolbar.add(updateLink);
@@ -1179,7 +1202,7 @@ public class MainWindow extends JFrame {
 			pathList.add(name);
 			path = path.getParentPath();
 		}
-		return pathList.toArray(new String[pathList.size()]);
+		return pathList.toArray(new String[0]);
 	}
 
 	public static void getExpandedPaths(JTree tree, TreePath path, List<TreePath> list) {
@@ -1283,10 +1306,6 @@ public class MainWindow extends JFrame {
 		return cacheObject;
 	}
 
-	public BackgroundWorker getBackgroundWorker() {
-		return backgroundWorker;
-	}
-
 	public BackgroundExecutor getBackgroundExecutor() {
 		return backgroundExecutor;
 	}
@@ -1312,6 +1331,11 @@ public class MainWindow extends JFrame {
 		saveSplittersInfo();
 		debuggerPanel.setVisible(false);
 		debuggerPanel = null;
+	}
+
+	public void showHeapUsageBar() {
+		settings.setShowHeapUsageBar(true);
+		heapUsageBar.setVisible(true);
 	}
 
 	private void initDebuggerPanel() {

@@ -111,7 +111,7 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 	/**
 	 * Check if all types resolved
 	 */
-	private boolean checkTypes(MethodNode mth) {
+	private static boolean checkTypes(MethodNode mth) {
 		for (SSAVar var : mth.getSVars()) {
 			ArgType type = var.getTypeInfo().getType();
 			if (!type.isTypeKnown()) {
@@ -210,7 +210,7 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 				if (ssaVar.getTypeInfo().getType().equals(candidateType)) {
 					LOG.info("Same type rejected: {} -> {}, bounds: {}", ssaVar, candidateType, bounds);
 				} else if (candidateType.isTypeKnown()) {
-					LOG.debug("Type set rejected: {} -> {}, bounds: {}", ssaVar, candidateType, bounds);
+					LOG.debug("Type rejected: {} -> {}, bounds: {}", ssaVar, candidateType, bounds);
 				}
 			}
 			return false;
@@ -293,6 +293,10 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 				addBound(typeInfo, makeAssignInvokeBound((InvokeNode) insn));
 				break;
 
+			case IGET:
+				addBound(typeInfo, makeAssignFieldGetBound((IndexInsnNode) insn));
+				break;
+
 			case CHECK_CAST:
 				addBound(typeInfo, new TypeBoundCheckCastAssign(root, (IndexInsnNode) insn));
 				break;
@@ -302,6 +306,14 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 				addBound(typeInfo, new TypeBoundConst(BoundEnum.ASSIGN, type));
 				break;
 		}
+	}
+
+	private ITypeBound makeAssignFieldGetBound(IndexInsnNode insn) {
+		ArgType initType = insn.getResult().getInitType();
+		if (initType.containsTypeVariable()) {
+			return new TypeBoundFieldGetAssign(root, insn, initType);
+		}
+		return new TypeBoundConst(BoundEnum.ASSIGN, initType);
 	}
 
 	private ITypeBound makeAssignInvokeBound(InvokeNode invokeNode) {
@@ -500,7 +512,10 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 	private int tryInsertVarCast(MethodNode mth, SSAVar var) {
 		for (ITypeBound bound : var.getTypeInfo().getBounds()) {
 			ArgType boundType = bound.getType();
-			if (boundType.isTypeKnown() && boundType.containsTypeVariable()) {
+			if (boundType.isTypeKnown()
+					&& !boundType.equals(var.getTypeInfo().getType())
+					&& boundType.containsTypeVariable()
+					&& !root.getTypeUtils().containsUnknownTypeVar(mth, boundType)) {
 				if (insertAssignCast(mth, var, boundType)) {
 					return 1;
 				}

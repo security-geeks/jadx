@@ -1,9 +1,8 @@
 package jadx.cli;
 
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.LoggerFactory;
-
-import com.beust.jcommander.IStringConverter;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
@@ -32,33 +31,55 @@ public class LogHelper {
 		}
 	}
 
+	@Nullable("For disable log level control")
 	private static LogLevelEnum logLevelValue;
 
-	public static void setLogLevelFromArgs(JadxCLIArgs args) {
-		if (isCustomLogConfig()) {
-			return;
-		}
-		LogLevelEnum logLevel = args.logLevel;
-		if (args.quiet) {
-			logLevel = LogLevelEnum.QUIET;
-		} else if (args.verbose) {
-			logLevel = LogLevelEnum.DEBUG;
-		}
-
-		applyLogLevel(logLevel);
+	public static void initLogLevel(JadxCLIArgs args) {
+		logLevelValue = getLogLevelFromArgs(args);
 	}
 
-	public static void applyLogLevel(LogLevelEnum logLevel) {
-		logLevelValue = logLevel;
+	private static LogLevelEnum getLogLevelFromArgs(JadxCLIArgs args) {
+		if (isCustomLogConfig()) {
+			return null;
+		}
+		if (args.quiet) {
+			args.logLevel = LogLevelEnum.QUIET;
+		} else if (args.verbose) {
+			args.logLevel = LogLevelEnum.DEBUG;
+		}
+		return args.logLevel;
+	}
 
+	public static void setLogLevel(LogLevelEnum newLogLevel) {
+		logLevelValue = newLogLevel;
+		applyLogLevel(logLevelValue);
+	}
+
+	public static void applyLogLevels() {
+		if (logLevelValue == null) {
+			return;
+		}
+		applyLogLevel(logLevelValue);
+		if (logLevelValue == LogLevelEnum.PROGRESS) {
+			fixForShowProgress();
+		}
+	}
+
+	/**
+	 * Show progress: change to 'INFO' for control classes
+	 */
+	private static void fixForShowProgress() {
+		setLevelForClass(JadxCLI.class, Level.INFO);
+		setLevelForClass(JadxDecompiler.class, Level.INFO);
+		setLevelForClass(SingleClassMode.class, Level.INFO);
+
+		// show warnings and errors from input plugins
+		setLevelForPackage("jadx.plugins.input", Level.WARN);
+	}
+
+	private static void applyLogLevel(@NotNull LogLevelEnum logLevel) {
 		Logger rootLogger = (Logger) LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
 		rootLogger.setLevel(logLevel.getLevel());
-
-		if (logLevel != LogLevelEnum.QUIET) {
-			// show progress for all levels except quiet
-			setLevelForClass(JadxCLI.class, Level.INFO);
-			setLevelForClass(JadxDecompiler.class, Level.INFO);
-		}
 	}
 
 	@Nullable
@@ -66,8 +87,12 @@ public class LogHelper {
 		return logLevelValue;
 	}
 
-	private static void setLevelForClass(Class<?> cls, Level level) {
+	public static void setLevelForClass(Class<?> cls, Level level) {
 		((Logger) LoggerFactory.getLogger(cls)).setLevel(level);
+	}
+
+	public static void setLevelForPackage(String pkgName, Level level) {
+		((Logger) LoggerFactory.getLogger(pkgName)).setLevel(level);
 	}
 
 	/**
@@ -85,19 +110,5 @@ public class LogHelper {
 			LOG.error("Failed to detect custom log config", e);
 		}
 		return false;
-	}
-
-	public static class LogLevelConverter implements IStringConverter<LogLevelEnum> {
-
-		@Override
-		public LogLevelEnum convert(String value) {
-			try {
-				return LogLevelEnum.valueOf(value.toUpperCase());
-			} catch (Exception e) {
-				throw new IllegalArgumentException(
-						'\'' + value + "' is unknown log level, possible values are "
-								+ JadxCLIArgs.enumValuesString(LogLevelEnum.values()));
-			}
-		}
 	}
 }

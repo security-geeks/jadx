@@ -4,39 +4,48 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
-import java.util.TreeSet;
 
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import jadx.core.Consts;
+import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.BlockNode;
-import jadx.core.dex.nodes.IContainer;
+import jadx.core.dex.nodes.IRegion;
+import jadx.core.dex.nodes.MethodNode;
 import jadx.core.utils.InsnUtils;
 import jadx.core.utils.Utils;
-import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public class ExceptionHandler {
 
-	private final Set<ClassInfo> catchTypes = new TreeSet<>();
-	private final int handleOffset;
+	private static final Logger LOG = LoggerFactory.getLogger(ExceptionHandler.class);
+
+	private final List<ClassInfo> catchTypes = new ArrayList<>(1);
+	private final int handlerOffset;
 
 	private BlockNode handlerBlock;
 	private final List<BlockNode> blocks = new ArrayList<>();
-	private IContainer handlerRegion;
+	private IRegion handlerRegion;
 	private InsnArg arg;
 
-	private TryCatchBlock tryBlock;
+	private TryCatchBlockAttr tryBlock;
 	private boolean isFinally;
 
 	private boolean removed = false;
 
-	public ExceptionHandler(int addr, @Nullable ClassInfo type) {
-		this.handleOffset = addr;
-		addCatchType(type);
+	public static ExceptionHandler build(MethodNode mth, int addr, @Nullable ClassInfo type) {
+		ExceptionHandler eh = new ExceptionHandler(addr);
+		eh.addCatchType(mth, type);
+		return eh;
+	}
+
+	private ExceptionHandler(int addr) {
+		this.handlerOffset = addr;
 	}
 
 	/**
@@ -44,23 +53,28 @@ public class ExceptionHandler {
 	 *
 	 * @param type - null for 'all' or 'Throwable' handler
 	 */
-	public void addCatchType(@Nullable ClassInfo type) {
+	public boolean addCatchType(MethodNode mth, @Nullable ClassInfo type) {
 		if (type != null) {
-			this.catchTypes.add(type);
-		} else {
-			if (!this.catchTypes.isEmpty()) {
-				throw new JadxRuntimeException("Null type added to not empty exception handler: " + this);
+			if (catchTypes.contains(type)) {
+				return false;
 			}
+			return catchTypes.add(type);
 		}
+		if (!this.catchTypes.isEmpty()) {
+			mth.addDebugComment("Throwable added to exception handler: '" + catchTypeStr() + "', keep only Throwable");
+			catchTypes.clear();
+			return true;
+		}
+		return false;
 	}
 
-	public void addCatchTypes(Collection<ClassInfo> types) {
+	public void addCatchTypes(MethodNode mth, Collection<ClassInfo> types) {
 		for (ClassInfo type : types) {
-			addCatchType(type);
+			addCatchType(mth, type);
 		}
 	}
 
-	public Set<ClassInfo> getCatchTypes() {
+	public List<ClassInfo> getCatchTypes() {
 		return catchTypes;
 	}
 
@@ -68,7 +82,7 @@ public class ExceptionHandler {
 		if (isCatchAll()) {
 			return ArgType.THROWABLE;
 		}
-		Set<ClassInfo> types = getCatchTypes();
+		List<ClassInfo> types = getCatchTypes();
 		if (types.size() == 1) {
 			return types.iterator().next().getType();
 		} else {
@@ -88,8 +102,8 @@ public class ExceptionHandler {
 		return false;
 	}
 
-	public int getHandleOffset() {
-		return handleOffset;
+	public int getHandlerOffset() {
+		return handlerOffset;
 	}
 
 	public BlockNode getHandlerBlock() {
@@ -108,11 +122,11 @@ public class ExceptionHandler {
 		blocks.add(node);
 	}
 
-	public IContainer getHandlerRegion() {
+	public IRegion getHandlerRegion() {
 		return handlerRegion;
 	}
 
-	public void setHandlerRegion(IContainer handlerRegion) {
+	public void setHandlerRegion(IRegion handlerRegion) {
 		this.handlerRegion = handlerRegion;
 	}
 
@@ -124,11 +138,11 @@ public class ExceptionHandler {
 		this.arg = arg;
 	}
 
-	public void setTryBlock(TryCatchBlock tryBlock) {
+	public void setTryBlock(TryCatchBlockAttr tryBlock) {
 		this.tryBlock = tryBlock;
 	}
 
-	public TryCatchBlock getTryBlock() {
+	public TryCatchBlockAttr getTryBlock() {
 		return tryBlock;
 	}
 
@@ -144,8 +158,48 @@ public class ExceptionHandler {
 		return removed;
 	}
 
+	@Nullable
+	public BlockNode getBottomSplitter() {
+		TryCatchBlockAttr handlerTryBlock = getTryBlock();
+		// TODO: Implement support for finding bottom splitter of catch with inner tries
+		if (handlerTryBlock.getInnerTryBlocks().size() > 1) {
+			LOG.warn("No support yet for finding bottom block of try body with multipe inner trys");
+			return null;
+		}
+		TryCatchBlockAttr searchForTryBody;
+		if (handlerTryBlock.getInnerTryBlocks().isEmpty()) {
+			searchForTryBody = handlerTryBlock;
+		} else {
+			searchForTryBody = Utils.getOne(handlerTryBlock.getInnerTryBlocks());
+		}
+
+		BlockNode splitter = null;
+		for (BlockNode handlerPredecessor : getHandlerBlock().getPredecessors()) {
+			if (!handlerPredecessor.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
+				continue;
+			}
+
+			for (BlockNode splitterPredecessor : handlerPredecessor.getPredecessors()) {
+				TryCatchBlockAttr tryBody = splitterPredecessor.get(AType.TRY_BLOCK);
+				if (tryBody == searchForTryBody) {
+					splitter = handlerPredecessor;
+					break;
+				}
+			}
+
+			if (splitter != null) {
+				break;
+			}
+		}
+		return splitter;
+	}
+
 	public void markForRemove() {
 		this.removed = true;
+		this.blocks.forEach(b -> {
+			b.add(AFlag.REMOVE);
+			b.add(AFlag.DONT_GENERATE);
+		});
 	}
 
 	@Override
@@ -157,14 +211,14 @@ public class ExceptionHandler {
 			return false;
 		}
 		ExceptionHandler that = (ExceptionHandler) o;
-		return handleOffset == that.handleOffset
+		return handlerOffset == that.handlerOffset
 				&& catchTypes.equals(that.catchTypes)
 				&& Objects.equals(tryBlock, that.tryBlock);
 	}
 
 	@Override
 	public int hashCode() {
-		return Objects.hash(catchTypes, handleOffset /* , tryBlock */);
+		return Objects.hash(catchTypes, handlerOffset /* , tryBlock */);
 	}
 
 	public String catchTypeStr() {
@@ -173,6 +227,6 @@ public class ExceptionHandler {
 
 	@Override
 	public String toString() {
-		return catchTypeStr() + " -> " + InsnUtils.formatOffset(handleOffset);
+		return catchTypeStr() + " -> " + InsnUtils.formatOffset(handlerOffset);
 	}
 }

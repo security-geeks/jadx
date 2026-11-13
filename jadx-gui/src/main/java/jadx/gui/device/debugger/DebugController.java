@@ -1,16 +1,24 @@
 package jadx.gui.device.debugger;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import javax.swing.JOptionPane;
 import javax.swing.tree.DefaultMutableTreeNode;
 
-import io.reactivex.annotations.NonNull;
-import io.reactivex.annotations.Nullable;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import jadx.api.JavaClass;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.ClassNode;
@@ -18,24 +26,34 @@ import jadx.core.dex.nodes.FieldNode;
 import jadx.core.utils.StringUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 import jadx.gui.device.debugger.BreakpointManager.FileBreakpoint;
-import jadx.gui.device.debugger.SmaliDebugger.*;
+import jadx.gui.device.debugger.SmaliDebugger.Frame;
+import jadx.gui.device.debugger.SmaliDebugger.RuntimeBreakpoint;
+import jadx.gui.device.debugger.SmaliDebugger.RuntimeDebugInfo;
+import jadx.gui.device.debugger.SmaliDebugger.RuntimeField;
+import jadx.gui.device.debugger.SmaliDebugger.RuntimeRegister;
+import jadx.gui.device.debugger.SmaliDebugger.RuntimeValue;
+import jadx.gui.device.debugger.SmaliDebugger.RuntimeVarInfo;
 import jadx.gui.device.debugger.smali.Smali;
 import jadx.gui.device.debugger.smali.SmaliRegister;
 import jadx.gui.treemodel.JClass;
-import jadx.gui.ui.IDebugController;
-import jadx.gui.ui.JDebuggerPanel;
-import jadx.gui.ui.JDebuggerPanel.*;
-
-import static jadx.gui.device.debugger.SmaliDebugger.RuntimeType;
+import jadx.gui.ui.panel.IDebugController;
+import jadx.gui.ui.panel.JDebuggerPanel;
+import jadx.gui.ui.panel.JDebuggerPanel.IListElement;
+import jadx.gui.ui.panel.JDebuggerPanel.ValueTreeNode;
+import jadx.gui.utils.NLS;
+import jadx.gui.utils.UiUtils;
 
 public final class DebugController implements SmaliDebugger.SuspendListener, IDebugController {
+
+	private static final Logger LOG = LoggerFactory.getLogger(DebugController.class);
 	private static final String ONCREATE_SIGNATURE = "onCreate(Landroid/os/Bundle;)V";
 	private static final Map<String, RuntimeType> TYPE_MAP = new HashMap<>();
 	private static final RuntimeType[] POSSIBLE_TYPES = { RuntimeType.OBJECT, RuntimeType.INT, RuntimeType.LONG };
+	private static final int DEFAULT_CACHE_SIZE = 512;
 
 	private JDebuggerPanel debuggerPanel;
 	private SmaliDebugger debugger;
-	private ArtAdapter.Debugger art;
+	private ArtAdapter.IArtAdapter art;
 	private final CurrentInfo cur = new CurrentInfo();
 
 	private BreakpointStore bpStore;
@@ -54,23 +72,22 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	private final ExecutorService updateQueue = Executors.newSingleThreadExecutor();
 	private final ExecutorService lazyQueue = Executors.newSingleThreadExecutor();
 
-	/**
-	 * @param args at least 3 elements, host, port and android release version respectively.
-	 */
 	@Override
-	public boolean startDebugger(JDebuggerPanel debuggerPanel, String[] args) {
+	public boolean startDebugger(JDebuggerPanel debuggerPanel, String adbHost, int adbPort, int androidVer) {
 		if (TYPE_MAP.isEmpty()) {
 			initTypeMap();
 		}
 		this.debuggerPanel = debuggerPanel;
-		debuggerPanel.resetUI();
+		UiUtils.uiRunAndWait(debuggerPanel::resetUI);
 		try {
-			debugger = SmaliDebugger.attach(args[0], Integer.parseInt(args[1]), this);
+			debugger = SmaliDebugger.attach(adbHost, adbPort, this);
 		} catch (SmaliDebuggerException e) {
+			JOptionPane.showMessageDialog(debuggerPanel.getMainWindow(), e.getMessage(),
+					NLS.str("error_dialog.title"), JOptionPane.ERROR_MESSAGE);
 			logErr(e);
 			return false;
 		}
-		art = ArtAdapter.getAdapter(Integer.parseInt(args[2]));
+		art = ArtAdapter.getAdapter(androidVer);
 		resetAllInfo();
 		hasResumed = false;
 		run = debugger::resume;
@@ -97,11 +114,17 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	}
 
 	private void stopAtOnCreate() {
-		JClass mainActivity = DbgUtils.searchMainActivity(debuggerPanel.getMainWindow());
-		if (mainActivity == null) {
+		DbgUtils.AppData appData = DbgUtils.parseAppData(debuggerPanel.getMainWindow());
+		if (appData == null) {
 			debuggerPanel.log("Failed to set breakpoint at onCreate, you have to do it yourself.");
 			return;
 		}
+		JavaClass mainActivityCls = appData.getMainActivityCls();
+		if (mainActivityCls == null) {
+			debuggerPanel.log("App has no launcher activity, breakpoint at onCreate not set, you have to set breakpoints yourself.");
+			return;
+		}
+		JClass mainActivity = DbgUtils.getJClass(mainActivityCls, debuggerPanel.getMainWindow());
 		lazyQueue.execute(() -> openMainActivityTab(mainActivity));
 		String clsSig = DbgUtils.getRawFullName(mainActivity);
 		try {
@@ -201,15 +224,12 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 
 	@Override
 	public String getProcessName() {
-		String pkg = DbgUtils.searchPackageName(debuggerPanel.getMainWindow());
-		if (pkg.isEmpty()) {
+		DbgUtils.AppData appData = DbgUtils.parseAppData(debuggerPanel.getMainWindow());
+		if (appData == null) {
 			return "";
 		}
-		JClass cls = DbgUtils.searchMainActivity(debuggerPanel.getMainWindow());
-		if (cls == null) {
-			return "";
-		}
-		return pkg + "/" + cls.getCls().getClassNode().getClassInfo().getFullName();
+		String processName = appData.getProcessName();
+		return processName != null ? processName : "";
 	}
 
 	private RuntimeType castType(ArgType type) {
@@ -234,7 +254,6 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		throw new JadxRuntimeException("Unexpected type: " + type);
 	}
 
-	@NonNull
 	protected static RuntimeType castType(String type) {
 		RuntimeType rt = null;
 		if (!StringUtils.isEmpty(type)) {
@@ -341,7 +360,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	}
 
 	@Override
-	public void onSuspendEvent(SmaliDebugger.SuspendInfo info) {
+	public void onSuspendEvent(SuspendInfo info) {
 		if (!isDebugging()) {
 			return;
 		}
@@ -367,7 +386,6 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		}
 		if (refreshLevel == 2) {
 			updateAllInfo(threadID, info.getOffset());
-
 		} else {
 			if (cur.smali != null && cur.frame != null) {
 				refreshRegInfo(info.getOffset());
@@ -395,7 +413,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		for (RegisterObserver.Info info : list) {
 			RegTreeNode reg = cur.frame.getRegNodes().get(info.getSmaliRegNum());
 			if (info.isLoad()) {
-				applyDbgInfo(reg, info.getInfo());
+				applyDbgInfo(reg, info.getName(), info.getType());
 			} else {
 				reg.setAlias("");
 				reg.setAbsoluteType(false);
@@ -538,7 +556,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		} catch (SmaliDebuggerException e) {
 			logErr(e);
 		}
-		if (frames.size() == 0) {
+		if (frames.isEmpty()) {
 			return null;
 		}
 		List<FrameNode> frameEleList = new ArrayList<>(frames.size());
@@ -647,28 +665,32 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	}
 
 	private void updateAllRegisters(FrameNode frame) {
-		if (buildRegTreeNodes(frame).size() > 0) {
-			fetchAllRegisters(frame);
-		}
+		UiUtils.uiRun(() -> {
+			if (!buildRegTreeNodes(frame).isEmpty()) {
+				fetchAllRegisters(frame);
+			}
+		});
 	}
 
 	private void fetchAllRegisters(FrameNode frame) {
 		List<SmaliRegister> regs = cur.regAdapter.getInitializedList(frame.getCodeOffset());
 		for (SmaliRegister reg : regs) {
-			lazyQueue.execute(() -> {
-				Entry<String, String> info = cur.regAdapter.getInfo(reg.getRuntimeRegNum(), frame.getCodeOffset());
-				RegTreeNode regNode = frame.getRegNodes().get(reg.getRegNum());
-				if (info != null) {
-					applyDbgInfo(regNode, info);
-				}
-				updateRegister(regNode, null, true);
-			});
+			RuntimeVarInfo info = cur.regAdapter.getInfo(reg.getRuntimeRegNum(), frame.getCodeOffset());
+			RegTreeNode regNode = frame.getRegNodes().get(reg.getRegNum());
+			if (info != null) {
+				applyDbgInfo(regNode, info);
+			}
+			updateRegister(regNode, null, true);
 		}
 	}
 
-	private void applyDbgInfo(RegTreeNode rn, Entry<String, String> info) {
-		rn.setAlias(info.getKey());
-		rn.updateType(info.getValue());
+	private void applyDbgInfo(RegTreeNode rn, RuntimeVarInfo info) {
+		applyDbgInfo(rn, info.getName(), info.getType());
+	}
+
+	private void applyDbgInfo(RegTreeNode rn, String alias, String type) {
+		rn.setAlias(alias);
+		rn.updateType(type);
 		rn.setAbsoluteType(true);
 	}
 
@@ -772,7 +794,6 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 					valNode.updateType("class_object").updateTypeID(debugger.readID(rValue));
 					break;
 			}
-
 		} catch (SmaliDebuggerException e) {
 			logErr(e);
 			return false;
@@ -864,7 +885,9 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 					cur.regAdapter = regAdaMap.computeIfAbsent(cur.mthFullID,
 							k -> RegisterObserver.merge(
 									getRuntimeDebugInfo(cur.frame),
-									getRegisterList()));
+									getSmaliRegisterList(),
+									art,
+									cur.mthFullID));
 
 					if (cur.smali.getRegCount(cur.mthFullID) > 0) {
 						updateAllRegisters(cur.frame);
@@ -876,7 +899,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		});
 	}
 
-	private List<SmaliRegister> getRegisterList() {
+	private List<SmaliRegister> getSmaliRegisterList() {
 		int regCount = cur.smali.getRegCount(cur.mthFullID);
 		int paramStart = cur.smali.getParamRegStart(cur.mthFullID);
 		List<SmaliRegister> srs = cur.smali.getRegisterList(cur.mthFullID);
@@ -889,8 +912,8 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	private void resetAllInfo() {
 		isSuspended = true;
 		toBeUpdatedTreeNode = null;
-		debuggerPanel.resetAllDebuggingInfo();
 		cur.reset();
+		UiUtils.uiRun(debuggerPanel::resetAllDebuggingInfo);
 	}
 
 	private List<RuntimeVarInfo> getRuntimeDebugInfo(FrameNode frame) {
@@ -913,16 +936,17 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	private void logErr(Exception e, String extra) {
 		debuggerPanel.log(e.getMessage());
 		debuggerPanel.log(extra);
-		e.printStackTrace();
+		LOG.error(extra, e);
 	}
 
 	private void logErr(Exception e) {
 		debuggerPanel.log(e.getMessage());
-		e.printStackTrace();
+		LOG.error("Debug error", e);
 	}
 
 	private void logErr(String e) {
 		debuggerPanel.log(e);
+		LOG.error("Debug error: {}", e);
 	}
 
 	private void scrollToPos(long codeOffset) {
@@ -1100,7 +1124,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		private long thisID;
 
 		public FrameNode(long threadID, SmaliDebugger.Frame frame) {
-			cache = new StringBuilder(16);
+			cache = new StringBuilder(DEFAULT_CACHE_SIZE);
 			this.frame = frame;
 			this.threadID = threadID;
 			regNodes = Collections.emptyList();
@@ -1138,7 +1162,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		public void setSignatures(String clsSig, String mthSig) {
 			this.clsSig = clsSig;
 			this.mthSig = mthSig;
-			this.cache.delete(0, this.cache.length());
+			resetCache();
 		}
 
 		public String getClsSig() {
@@ -1152,7 +1176,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		public void updateCodeOffset(long codeOffset) {
 			this.codeOffset = codeOffset;
 			if (this.codeOffset > -1) {
-				this.cache.delete(0, this.cache.length());
+				resetCache();
 			}
 		}
 
@@ -1194,27 +1218,34 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 			}
 		}
 
+		private void resetCache() {
+			// Do not reuse thee existing cache instance as this can result in
+			// multi-threading access issues in case toString() method is active
+			this.cache = new StringBuilder(DEFAULT_CACHE_SIZE);
+		}
+
 		@Override
 		public String toString() {
-			if (cache.length() == 0) {
+			StringBuilder sbCache = cache;
+			if (sbCache.length() == 0) {
 				long off = getCodeOffset();
 				if (off < 0) {
-					cache.append(String.format("index: %-4d ", off));
+					sbCache.append(String.format("index: %-4d ", off));
 				} else {
-					cache.append(String.format("index: %04x ", off));
+					sbCache.append(String.format("index: %04x ", off));
 				}
 				if (clsSig == null) {
-					cache.append("clsID: ").append(frame.getClassID());
+					sbCache.append("clsID: ").append(frame.getClassID());
 				} else {
-					cache.append(clsSig).append("->");
+					sbCache.append(clsSig).append("->");
 				}
 				if (mthSig == null) {
-					cache.append(" mthID: ").append(frame.getMethodID());
+					sbCache.append(" mthID: ").append(frame.getMethodID());
 				} else {
-					cache.append(mthSig);
+					sbCache.append(mthSig);
 				}
 			}
-			return cache.toString();
+			return sbCache.toString();
 		}
 	}
 
@@ -1343,7 +1374,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		}
 	}
 
-	private static class FieldTreeNode extends RuntimeValueTreeNode {
+	static class FieldTreeNode extends RuntimeValueTreeNode {
 		private static final long serialVersionUID = -1111111202103122235L;
 
 		private final RuntimeField field;

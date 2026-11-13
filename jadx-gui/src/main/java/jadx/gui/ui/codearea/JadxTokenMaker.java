@@ -1,5 +1,7 @@
 package jadx.gui.ui.codearea;
 
+import java.util.Set;
+
 import javax.swing.text.Segment;
 
 import org.fife.ui.rsyntaxtextarea.Token;
@@ -12,7 +14,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.api.JavaClass;
+import jadx.api.JavaMethod;
 import jadx.api.JavaNode;
+
+import static jadx.api.plugins.utils.Utils.constSet;
 
 public final class JadxTokenMaker extends JavaTokenMaker {
 	private static final Logger LOG = LoggerFactory.getLogger(JadxTokenMaker.class);
@@ -25,23 +30,41 @@ public final class JadxTokenMaker extends JavaTokenMaker {
 
 	@Override
 	public Token getTokenList(Segment text, int initialTokenType, int startOffset) {
-		Token tokens = super.getTokenList(text, initialTokenType, startOffset);
-		if (tokens.getType() != TokenTypes.NULL) {
-			try {
-				processTokens(tokens);
-			} catch (Exception e) {
-				LOG.error("Process tokens failed for text: {}", text, e);
-			}
+		if (codeArea.isDisposed()) {
+			return new TokenImpl();
 		}
-		return tokens;
+		try {
+			Token tokens = super.getTokenList(text, initialTokenType, startOffset);
+			if (tokens != null && tokens.getType() != TokenTypes.NULL) {
+				processTokens(tokens);
+			}
+			return tokens;
+		} catch (Throwable e) { // JavaTokenMaker throws 'java.lang.Error' if failed to parse input string
+			LOG.error("Process tokens failed for text: {}", text, e);
+			return new TokenImpl();
+		}
 	}
 
 	private void processTokens(Token tokens) {
 		Token prev = null;
 		Token current = tokens;
-		while (current != null) {
+		while (current != null && current.getType() != TokenTypes.NULL) {
+			switch (current.getType()) {
+				case TokenTypes.RESERVED_WORD:
+				case TokenTypes.RESERVED_WORD_2:
+				case TokenTypes.DATA_TYPE:
+					fixContextualKeyword(current);
+					break;
+
+				default:
+					break;
+			}
 			if (prev != null) {
 				switch (current.getType()) {
+					case TokenTypes.FUNCTION:
+						fixIdentifierWithTheSameNameAsJavaLangClass(current);
+						break;
+
 					case TokenTypes.IDENTIFIER:
 						current = mergeLongClassNames(prev, current, false);
 						break;
@@ -49,10 +72,42 @@ public final class JadxTokenMaker extends JavaTokenMaker {
 					case TokenTypes.ANNOTATION:
 						current = mergeLongClassNames(prev, current, true);
 						break;
+
+					default:
+						break;
 				}
 			}
 			prev = current;
 			current = current.getNextToken();
+		}
+	}
+
+	private static final Set<String> CONTEXTUAL_KEYWORDS = constSet(
+			"exports", "module", "non-sealed", "open", "opens", "permits", "provides", "record",
+			"requires", "sealed", "to", "transitive", "uses", "var", "with", "yield");
+
+	static void fixContextualKeyword(Token token) {
+		String lexeme = token.getLexeme(); // TODO: create new string every call, better to avoid
+		if (lexeme != null && CONTEXTUAL_KEYWORDS.contains(lexeme)) {
+			token.setType(TokenTypes.IDENTIFIER);
+		}
+	}
+
+	private void fixIdentifierWithTheSameNameAsJavaLangClass(Token token) {
+		JavaNode identifier = codeArea.getJavaNodeAtOffset(token.getTextOffset());
+		if (identifier == null) {
+			return;
+		}
+		String lexeme = token.getLexeme();
+		if (lexeme.equals(identifier.getName())) {
+			token.setType(TokenTypes.IDENTIFIER);
+			return;
+		}
+		if (identifier instanceof JavaMethod) {
+			JavaClass javaCls = identifier.getDeclaringClass();
+			if (lexeme.equals(javaCls.getName())) {
+				token.setType(TokenTypes.IDENTIFIER);
+			}
 		}
 	}
 
@@ -62,14 +117,14 @@ public final class JadxTokenMaker extends JavaTokenMaker {
 		if (annotation) {
 			offset++;
 		}
-		JavaNode javaNode = codeArea.getJavaNodeAtOffset(offset);
-		if (javaNode instanceof JavaClass) {
-			String name = javaNode.getName();
+		JavaClass javaCls = codeArea.getJavaClassIfAtPos(offset);
+		if (javaCls != null) {
+			String name = javaCls.getName();
 			String lexeme = current.getLexeme();
 			if (annotation && lexeme.length() > 1) {
 				lexeme = lexeme.substring(1);
 			}
-			if (!lexeme.equals(name) && isClassNameStart(javaNode, lexeme)) {
+			if (!lexeme.equals(name) && isClassNameStart(javaCls, lexeme)) {
 				// try to replace long class name with one token
 				Token replace = concatTokensUntil(current, name);
 				if (replace != null && prev instanceof TokenImpl) {

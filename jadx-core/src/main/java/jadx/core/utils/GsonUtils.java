@@ -2,20 +2,35 @@ package jadx.core.utils;
 
 import java.lang.reflect.Type;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonDeserializationContext;
 import com.google.gson.JsonDeserializer;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonSerializationContext;
 import com.google.gson.JsonSerializer;
+import com.google.gson.Strictness;
 
 public class GsonUtils {
+
+	public static Gson buildGson() {
+		return defaultGsonBuilder().create();
+	}
+
+	public static GsonBuilder defaultGsonBuilder() {
+		return new GsonBuilder()
+				.disableJdkUnsafe()
+				.disableInnerClassSerialization()
+				.setStrictness(Strictness.STRICT)
+				.setPrettyPrinting();
+	}
 
 	public static <T> InterfaceReplace<T> interfaceReplace(Class<T> replaceCls) {
 		return new InterfaceReplace<>(replaceCls);
 	}
 
-	private static final class InterfaceReplace<T> implements JsonSerializer<T>, JsonDeserializer<T> {
+	public static final class InterfaceReplace<T> implements JsonSerializer<T>, JsonDeserializer<T> {
 		private final Class<T> replaceCls;
 
 		private InterfaceReplace(Class<T> replaceCls) {

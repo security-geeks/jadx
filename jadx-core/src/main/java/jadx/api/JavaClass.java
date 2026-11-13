@@ -6,27 +6,36 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.metadata.ICodeAnnotation;
+import jadx.api.metadata.ICodeNodeRef;
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.AnonymousClassAttr;
+import jadx.core.dex.attributes.nodes.InlinedAttr;
 import jadx.core.dex.info.AccessInfo;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.utils.ListUtils;
 
 public final class JavaClass implements JavaNode {
-
-	private final JadxDecompiler decompiler;
+	private final @Nullable JadxDecompiler decompiler;
 	private final ClassNode cls;
-	private final JavaClass parent;
+	private final @Nullable JavaClass parent;
 
 	private List<JavaClass> innerClasses = Collections.emptyList();
+	private List<JavaClass> inlinedClasses = Collections.emptyList();
 	private List<JavaField> fields = Collections.emptyList();
 	private List<JavaMethod> methods = Collections.emptyList();
 	private boolean listsLoaded;
 
-	JavaClass(ClassNode classNode, JadxDecompiler decompiler) {
+	JavaClass(ClassNode classNode, @NotNull JadxDecompiler decompiler) {
 		this.decompiler = decompiler;
 		this.cls = classNode;
 		this.parent = null;
@@ -35,67 +44,131 @@ public final class JavaClass implements JavaNode {
 	/**
 	 * Inner classes constructor
 	 */
-	JavaClass(ClassNode classNode, JavaClass parent) {
+	JavaClass(ClassNode classNode, @NotNull JavaClass parent) {
 		this.decompiler = null;
 		this.cls = classNode;
 		this.parent = parent;
 	}
 
 	public String getCode() {
-		ICodeInfo code = getCodeInfo();
-		if (code == null) {
-			return "";
-		}
-		return code.getCodeStr();
+		return getCodeInfo().getCodeStr();
 	}
 
-	public ICodeInfo getCodeInfo() {
+	public @NotNull ICodeInfo getCodeInfo() {
+		ICodeInfo code = load();
+		if (code != null) {
+			return code;
+		}
 		return cls.decompile();
 	}
 
 	public void decompile() {
-		cls.decompile();
+		load();
 	}
 
-	public synchronized void reload() {
-		listsLoaded = false;
-		cls.reloadCode();
-	}
-
-	public synchronized String getSmali() {
-		return cls.getSmali();
-	}
-
-	public synchronized void unload() {
-		cls.unload();
-		listsLoaded = false;
+	public ICodeInfo decompileWithMode(DecompilationMode mode) {
+		return cls.decompileWithMode(mode);
 	}
 
 	/**
-	 * Internal API. Not Stable!
+	 * Detect if calling load() would trigger a potentially expensive decompilation operation.
 	 */
+	public boolean loadingWouldRequireDecompilation() {
+		if (listsLoaded) {
+			// lists are already populated, so it's safe regardless of the state of the class itself
+			return false;
+		}
+		if (cls.getState().isProcessComplete()) {
+			// decompilation has already finished
+			return false;
+		}
+		return true;
+	}
+
+	public synchronized ICodeInfo reload() {
+		listsLoaded = false;
+		return cls.reloadCode();
+	}
+
+	public void unload() {
+		listsLoaded = false;
+		cls.unloadCode();
+	}
+
+	public boolean isNoCode() {
+		return cls.contains(AFlag.DONT_GENERATE);
+	}
+
+	public boolean isInner() {
+		return cls.isInner();
+	}
+
+	public synchronized String getSmali() {
+		return cls.getDisassembledCode();
+	}
+
+	@Override
+	public boolean isOwnCodeAnnotation(ICodeAnnotation ann) {
+		if (ann.getAnnType() == ICodeAnnotation.AnnType.CLASS) {
+			return ann.equals(cls);
+		}
+		return false;
+	}
+
+	@Override
+	public ICodeNodeRef getCodeNodeRef() {
+		return cls;
+	}
+
 	public ClassNode getClassNode() {
 		return cls;
 	}
 
-	private synchronized void loadLists() {
+	/**
+	 * Decompile class and loads internal lists of fields, methods, etc.
+	 * Do nothing if already loaded.
+	 *
+	 * @return code info if decompilation was executed, null otherwise
+	 */
+	private synchronized @Nullable ICodeInfo load() {
 		if (listsLoaded) {
-			return;
+			return null;
 		}
-		listsLoaded = true;
-		decompile();
+		ICodeInfo code;
+		if (cls.getState().isProcessComplete()) {
+			// already decompiled -> class internals loaded
+			code = null;
+		} else {
+			code = cls.decompile();
+		}
+		loadLists();
+		return code;
+	}
 
+	private void loadLists() {
+		listsLoaded = true;
+		JadxDecompiler rootDecompiler = getRootDecompiler();
 		int inClsCount = cls.getInnerClasses().size();
 		if (inClsCount != 0) {
 			List<JavaClass> list = new ArrayList<>(inClsCount);
 			for (ClassNode inner : cls.getInnerClasses()) {
 				if (!inner.contains(AFlag.DONT_GENERATE)) {
-					JavaClass javaClass = new JavaClass(inner, this);
+					JavaClass javaClass = rootDecompiler.convertClassNode(inner);
 					javaClass.loadLists();
 					list.add(javaClass);
 				}
 			}
 			this.innerClasses = Collections.unmodifiableList(list);
+		}
+		int inlinedClsCount = cls.getInlinedClasses().size();
+		if (inlinedClsCount != 0) {
+			List<JavaClass> list = new ArrayList<>(inlinedClsCount);
+			for (ClassNode inner : cls.getInlinedClasses()) {
+				JavaClass javaClass = rootDecompiler.convertClassNode(inner);
+				javaClass.loadLists();
+				list.add(javaClass);
+			}
+			this.inlinedClasses = Collections.unmodifiableList(list);
 		}
 
 		int fieldsCount = cls.getFields().size();
@@ -103,8 +176,7 @@ public final class JavaClass implements JavaNode {
 			List<JavaField> flds = new ArrayList<>(fieldsCount);
 			for (FieldNode f : cls.getFields()) {
 				if (!f.contains(AFlag.DONT_GENERATE)) {
-					JavaField javaField = new JavaField(f, this);
-					flds.add(javaField);
+					flds.add(rootDecompiler.convertFieldNode(f));
 				}
 			}
 			this.fields = Collections.unmodifiableList(flds);
@@ -115,8 +187,7 @@ public final class JavaClass implements JavaNode {
 			List<JavaMethod> mths = new ArrayList<>(methodsCount);
 			for (MethodNode m : cls.getMethods()) {
 				if (!m.contains(AFlag.DONT_GENERATE)) {
-					JavaMethod javaMethod = new JavaMethod(this, m);
-					mths.add(javaMethod);
+					mths.add(rootDecompiler.convertMethodNode(m));
 				}
 			}
 			mths.sort(Comparator.comparing(JavaMethod::getName));
@@ -124,40 +195,48 @@ public final class JavaClass implements JavaNode {
 		}
 	}
 
-	protected JadxDecompiler getRootDecompiler() {
+	JadxDecompiler getRootDecompiler() {
 		if (parent != null) {
 			return parent.getRootDecompiler();
 		}
-		return decompiler;
+		return Objects.requireNonNull(decompiler);
 	}
 
-	public Map<CodePosition, Object> getCodeAnnotations() {
-		ICodeInfo code = getCodeInfo();
-		if (code == null) {
-			return Collections.emptyMap();
-		}
-		return code.getAnnotations();
+	public @Nullable ICodeAnnotation getAnnotationAt(int pos) {
+		return getCodeInfo().getCodeMetadata().getAt(pos);
 	}
 
-	public Object getAnnotationAt(CodePosition pos) {
-		return getCodeAnnotations().get(pos);
-	}
-
-	public Map<CodePosition, JavaNode> getUsageMap() {
-		Map<CodePosition, Object> map = getCodeAnnotations();
+	public Map<Integer, JavaNode> getUsageMap() {
+		Map<Integer, ICodeAnnotation> map = getCodeInfo().getCodeMetadata().getAsMap();
 		if (map.isEmpty() || decompiler == null) {
 			return Collections.emptyMap();
 		}
-		Map<CodePosition, JavaNode> resultMap = new HashMap<>(map.size());
-		for (Map.Entry<CodePosition, Object> entry : map.entrySet()) {
-			CodePosition codePosition = entry.getKey();
-			Object obj = entry.getValue();
-			JavaNode node = getRootDecompiler().convertNode(obj);
-			if (node != null) {
-				resultMap.put(codePosition, node);
+		Map<Integer, JavaNode> resultMap = new HashMap<>(map.size());
+		for (Map.Entry<Integer, ICodeAnnotation> entry : map.entrySet()) {
+			int codePosition = entry.getKey();
+			ICodeAnnotation obj = entry.getValue();
+			if (obj instanceof ICodeNodeRef) {
+				JavaNode node = getRootDecompiler().getJavaNodeByRef((ICodeNodeRef) obj);
+				if (node != null) {
+					resultMap.put(codePosition, node);
+				}
 			}
 		}
 		return resultMap;
+	}
+
+	public List<Integer> getUsePlacesFor(ICodeInfo codeInfo, JavaNode javaNode) {
+		if (!codeInfo.hasMetadata()) {
+			return Collections.emptyList();
+		}
+		List<Integer> result = new ArrayList<>();
+		codeInfo.getCodeMetadata().searchDown(0, (pos, ann) -> {
+			if (javaNode.isOwnCodeAnnotation(ann)) {
+				result.add(pos);
+			}
+			return null;
+		});
+		return result;
 	}
 
 	@Override
@@ -165,20 +244,8 @@ public final class JavaClass implements JavaNode {
 		return getRootDecompiler().convertNodes(cls.getUseIn());
 	}
 
-	@Nullable
-	@Deprecated
-	public JavaNode getJavaNodeAtPosition(int line, int offset) {
-		return getRootDecompiler().getJavaNodeAtPosition(getCodeInfo(), line, offset);
-	}
-
-	@Nullable
-	@Deprecated
-	public CodePosition getDefinitionPosition() {
-		return getRootDecompiler().getDefinitionPosition(this);
-	}
-
 	public Integer getSourceLine(int decompiledLine) {
-		return getCodeInfo().getLineMapping().get(decompiledLine);
+		return getCodeInfo().getCodeMetadata().getLineMapping().get(decompiledLine);
 	}
 
 	@Override
@@ -199,38 +266,115 @@ public final class JavaClass implements JavaNode {
 		return cls.getPackage();
 	}
 
-	@Override
-	public JavaClass getDeclaringClass() {
-		return parent;
+	public JavaPackage getJavaPackage() {
+		return cls.getPackageNode().getJavaNode();
 	}
 
 	@Override
+	public @Nullable JavaClass getDeclaringClass() {
+		return parent;
+	}
+
+	public JavaClass getOriginalTopParentClass() {
+		return parent == null ? this : parent.getOriginalTopParentClass();
+	}
+
+	/**
+	 * Return top parent class which contains code of this class.
+	 * Code parent can be different from original parent after move or inline
+	 *
+	 * @return this if already a top class
+	 */
+	@Override
 	public JavaClass getTopParentClass() {
-		return parent == null ? this : parent.getTopParentClass();
+		JavaClass codeParent = getCodeParent();
+		return codeParent == null ? this : codeParent.getTopParentClass();
+	}
+
+	/**
+	 * Return parent class which contains code of this class.
+	 * Code parent can be different for original parent after move or inline
+	 */
+	public @Nullable JavaClass getCodeParent() {
+		AnonymousClassAttr anonymousClsAttr = cls.get(AType.ANONYMOUS_CLASS);
+		if (anonymousClsAttr != null) {
+			// moved to usage class
+			return getRootDecompiler().convertClassNode(anonymousClsAttr.getOuterCls());
+		}
+		InlinedAttr inlinedAttr = cls.get(AType.INLINED);
+		if (inlinedAttr != null) {
+			return getRootDecompiler().convertClassNode(inlinedAttr.getInlineCls());
+		}
+		return parent;
 	}
 
 	public AccessInfo getAccessInfo() {
 		return cls.getAccessFlags();
 	}
 
+	@Nullable
+	public ArgType getSuperClass() {
+		ArgType superClass = cls.getSuperClass();
+		if (superClass == null) {
+			return null;
+		}
+		return ArgType.tryToResolveClassAlias(cls.root(), superClass);
+	}
+
+	public List<ArgType> getInterfaces() {
+		return ArgType.tryToResolveClassAlias(cls.root(), cls.getInterfaces());
+	}
+
 	public List<JavaClass> getInnerClasses() {
-		loadLists();
+		load();
 		return innerClasses;
 	}
 
+	public List<JavaClass> getInlinedClasses() {
+		load();
+		return inlinedClasses;
+	}
+
 	public List<JavaField> getFields() {
-		loadLists();
+		load();
 		return fields;
 	}
 
 	public List<JavaMethod> getMethods() {
-		loadLists();
+		load();
 		return methods;
 	}
 
+	@Nullable
+	public JavaMethod searchMethodByShortId(String shortId) {
+		MethodNode methodNode = cls.searchMethodByShortId(shortId);
+		if (methodNode == null) {
+			return null;
+		}
+		return getRootDecompiler().convertMethodNode(methodNode);
+	}
+
+	@Nullable
+	public JavaField searchFieldByShortId(String shortId) {
+		FieldNode fieldNode = cls.searchFieldByShortId(shortId);
+		if (fieldNode == null) {
+			return null;
+		}
+		return getRootDecompiler().convertFieldNode(fieldNode);
+	}
+
+	public List<JavaClass> getDependencies() {
+		JadxDecompiler d = getRootDecompiler();
+		return ListUtils.map(cls.getDependencies(), d::convertClassNode);
+	}
+
+	public int getTotalDepsCount() {
+		return cls.getTotalDepsCount();
+	}
+
 	@Override
-	public int getDecompiledLine() {
-		return cls.getDecompiledLine();
+	public void removeAlias() {
+		cls.removeAlias();
 	}
 
 	@Override

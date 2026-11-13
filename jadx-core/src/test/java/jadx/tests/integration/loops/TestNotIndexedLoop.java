@@ -4,15 +4,10 @@ import java.io.File;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.IntegrationTest;
+import jadx.tests.api.utils.assertj.JadxAssertions;
 
-import static jadx.tests.api.utils.JadxMatchers.containsOne;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.nullValue;
+import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestNotIndexedLoop extends IntegrationTest {
 
@@ -28,7 +23,7 @@ public class TestNotIndexedLoop extends IntegrationTest {
 					int i = 0;
 					while (true) {
 						if (i >= length) {
-							file = null;
+							file = new File("h");
 							break;
 						}
 						file = files[i];
@@ -48,30 +43,30 @@ public class TestNotIndexedLoop extends IntegrationTest {
 		}
 
 		public void check() {
-			assertThat(test(null), nullValue());
-			assertThat(test(new File[] {}), nullValue());
+			assertThat(test(null)).isNull();
+			assertThat(test(new File[] {})).isNull();
 
 			File file = new File("f");
-			assertThat(test(new File[] { new File("a"), file }), is(file));
+			assertThat(test(new File[] { new File("a"), file })).isEqualTo(file);
+
+			assertThat(test(new File[] { new File("a") }).getName()).isEqualTo("h");
 		}
 	}
 
 	@Test
 	public void test() {
-		ClassNode cls = getClassNode(TestCls.class);
-		String code = cls.getCode().toString();
-
-		assertThat(code, not(containsString("for (")));
-		assertThat(code, containsOne("while (true) {"));
+		JadxAssertions.assertThat(getClassNode(TestCls.class))
+				.code()
+				.doesNotContain("for (")
+				.containsOne("while (true) {");
 	}
 
 	@Test
 	public void testNoDebug() {
 		noDebugInfo();
-		ClassNode cls = getClassNode(TestCls.class);
-		String code = cls.getCode().toString();
-
-		assertThat(code, not(containsString("for (")));
-		assertThat(code, containsOne("while (true) {"));
+		JadxAssertions.assertThat(getClassNode(TestCls.class))
+				.code()
+				.doesNotContain("for (")
+				.containsOne("while (true) {");
 	}
 }

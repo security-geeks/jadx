@@ -1,13 +1,12 @@
 package jadx.core.dex.visitors.regions.variables;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
 
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,6 +18,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
+import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
@@ -30,6 +30,7 @@ import jadx.core.dex.visitors.regions.AbstractRegionVisitor;
 import jadx.core.dex.visitors.regions.DepthRegionTraversal;
 import jadx.core.dex.visitors.typeinference.TypeCompare;
 import jadx.core.dex.visitors.typeinference.TypeCompareEnum;
+import jadx.core.utils.ListUtils;
 import jadx.core.utils.RegionUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxException;
@@ -72,14 +73,85 @@ public class ProcessVariables extends AbstractVisitor {
 			public void processBlock(MethodNode mth, IBlock container) {
 				for (InsnNode insn : container.getInstructions()) {
 					RegisterArg resultArg = insn.getResult();
-					if (resultArg != null) {
-						SSAVar ssaVar = resultArg.getSVar();
-						if (ssaVar.getUseList().isEmpty() && insn.canRemoveResult()) {
+					if (resultArg == null) {
+						continue;
+					}
+					SSAVar ssaVar = resultArg.getSVar();
+					if (isVarUnused(mth, ssaVar)) {
+						boolean remove = false;
+						if (insn.canRemoveResult()) {
+							// remove unused result
+							remove = true;
+						} else if (canRemoveInsn(insn)) {
+							// remove whole insn
+							insn.add(AFlag.REMOVE);
+							insn.add(AFlag.DONT_GENERATE);
+							remove = true;
+						}
+						if (remove) {
 							insn.setResult(null);
 							mth.removeSVar(ssaVar);
+							for (RegisterArg arg : ssaVar.getUseList()) {
+								arg.resetSSAVar();
+							}
 						}
 					}
 				}
+			}
+
+			/**
+			 * Remove insn if a result is not used
+			 */
+			private boolean canRemoveInsn(InsnNode insn) {
+				if (insn.isConstInsn()) {
+					return true;
+				}
+				switch (insn.getType()) {
+					case CAST:
+					case CHECK_CAST:
+						return true;
+					default:
+						return false;
+				}
+			}
+
+			private boolean isVarUnused(MethodNode mth, @Nullable SSAVar ssaVar) {
+				if (ssaVar == null) {
+					return true;
+				}
+				List<RegisterArg> useList = ssaVar.getUseList();
+				if (useList.isEmpty()) {
+					return true;
+				}
+				if (ssaVar.isUsedInPhi()) {
+					return false;
+				}
+				return ListUtils.allMatch(useList, arg -> isArgUnused(mth, arg));
+			}
+
+			private boolean isArgUnused(MethodNode mth, RegisterArg arg) {
+				if (arg.contains(AFlag.REMOVE)) {
+					return true;
+				}
+				// check constructors for removed args
+				InsnNode parentInsn = arg.getParentInsn();
+				if (parentInsn != null
+						&& parentInsn.getType() == InsnType.CONSTRUCTOR
+						&& parentInsn.contains(AType.METHOD_DETAILS)) {
+					MethodNode resolveMth = mth.root().getMethodUtils().resolveMethod(((ConstructorInsn) parentInsn));
+					if (resolveMth != null && resolveMth.contains(AType.SKIP_MTH_ARGS)) {
+						int insnPos = parentInsn.getArgIndex(arg);
+						List<RegisterArg> mthArgs = resolveMth.getArgRegs();
+						if (0 <= insnPos && insnPos < mthArgs.size()) {
+							RegisterArg mthArg = mthArgs.get(insnPos);
+							if (mthArg.contains(AFlag.REMOVE) && arg.sameType(mthArg)) {
+								arg.add(AFlag.DONT_GENERATE);
+								return true;
+							}
+						}
+					}
+				}
+				return false;
 			}
 		});
 	}
@@ -215,23 +287,28 @@ public class ProcessVariables extends AbstractVisitor {
 	 * Check if all {@code usePlaces} are after {@code checkPlace}
 	 */
 	private static boolean isAllUseAfter(UsePlace checkPlace, List<UsePlace> usePlaces) {
-
-		IRegion region = checkPlace.getRegion();
-		IBlock block = checkPlace.getBlock();
-		Set<UsePlace> toCheck = new HashSet<>(usePlaces);
-		boolean blockFound = false;
-		for (IContainer subBlock : region.getSubBlocks()) {
-			if (!blockFound && subBlock == block) {
-				blockFound = true;
-			}
-			if (blockFound) {
-				toCheck.removeIf(usePlace -> isContainerContainsUsePlace(subBlock, usePlace));
-				if (toCheck.isEmpty()) {
-					return true;
-				}
+		List<IContainer> subBlocks = checkPlace.getRegion().getSubBlocks();
+		int blockIndex = indexOfContainer(subBlocks, checkPlace.getBlock());
+		if (blockIndex == -1) {
+			return false;
+		}
+		List<IContainer> blocksAfter = subBlocks.subList(blockIndex, subBlocks.size());
+		for (UsePlace usePlace : usePlaces) {
+			if (!ListUtils.anyMatch(blocksAfter, subBlock -> isContainerContainsUsePlace(subBlock, usePlace))) {
+				return false;
 			}
 		}
-		return false;
+		return true;
+	}
+
+	private static int indexOfContainer(List<IContainer> containers, IContainer container) {
+		int size = containers.size();
+		for (int i = 0; i < size; i++) {
+			if (containers.get(i) == container) {
+				return i;
+			}
+		}
+		return -1;
 	}
 
 	private static boolean isContainerContainsUsePlace(IContainer subBlock, UsePlace usePlace) {
@@ -257,6 +334,7 @@ public class ProcessVariables extends AbstractVisitor {
 			return false;
 		}
 		parentInsn.add(AFlag.DECLARE_VAR);
+		var.getCodeVar().setDeclared(true);
 		return true;
 	}
 

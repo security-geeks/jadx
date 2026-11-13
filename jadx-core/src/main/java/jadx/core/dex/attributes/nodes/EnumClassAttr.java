@@ -2,23 +2,27 @@ package jadx.core.dex.attributes.nodes;
 
 import java.util.List;
 
+import org.jetbrains.annotations.Nullable;
+
+import jadx.api.plugins.input.data.attributes.IJadxAttribute;
 import jadx.core.dex.attributes.AType;
-import jadx.core.dex.attributes.IAttribute;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.MethodNode;
 
-public class EnumClassAttr implements IAttribute {
+public class EnumClassAttr implements IJadxAttribute {
 
 	public static class EnumField {
 		private final FieldNode field;
 		private final ConstructorInsn constrInsn;
+		private final @Nullable String nameStr;
 		private ClassNode cls;
 
-		public EnumField(FieldNode field, ConstructorInsn co) {
+		public EnumField(FieldNode field, ConstructorInsn co, @Nullable String nameStr) {
 			this.field = field;
 			this.constrInsn = co;
+			this.nameStr = nameStr;
 		}
 
 		public FieldNode getField() {
@@ -35,6 +39,10 @@ public class EnumClassAttr implements IAttribute {
 
 		public void setCls(ClassNode cls) {
 			this.cls = cls;
+		}
+
+		public @Nullable String getNameStr() {
+			return nameStr;
 		}
 
 		@Override
@@ -63,7 +71,7 @@ public class EnumClassAttr implements IAttribute {
 	}
 
 	@Override
-	public AType<EnumClassAttr> getType() {
+	public AType<EnumClassAttr> getAttrType() {
 		return AType.ENUM_CLASS;
 	}
 

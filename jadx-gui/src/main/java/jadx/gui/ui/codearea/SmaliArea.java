@@ -1,6 +1,7 @@
 package jadx.gui.ui.codearea;
 
-import java.awt.*;
+import java.awt.Color;
+import java.awt.Font;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseEvent;
@@ -9,70 +10,80 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import javax.swing.*;
+import javax.swing.AbstractAction;
+import javax.swing.Icon;
+import javax.swing.KeyStroke;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.EditorKit;
 import javax.swing.text.JTextComponent;
 
-import org.fife.ui.rsyntaxtextarea.*;
-import org.fife.ui.rtextarea.*;
+import org.fife.ui.rsyntaxtextarea.FoldingAwareIconRowHeader;
+import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
+import org.fife.ui.rsyntaxtextarea.RSyntaxTextAreaEditorKit;
+import org.fife.ui.rsyntaxtextarea.RSyntaxTextAreaUI;
+import org.fife.ui.rsyntaxtextarea.RSyntaxUtilities;
+import org.fife.ui.rsyntaxtextarea.Style;
+import org.fife.ui.rsyntaxtextarea.SyntaxConstants;
+import org.fife.ui.rsyntaxtextarea.SyntaxScheme;
+import org.fife.ui.rtextarea.Gutter;
+import org.fife.ui.rtextarea.GutterIconInfo;
+import org.fife.ui.rtextarea.IconRowHeader;
+import org.fife.ui.rtextarea.RTextArea;
+import org.fife.ui.rtextarea.RTextAreaUI;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import jadx.api.ICodeInfo;
 import jadx.gui.device.debugger.BreakpointManager;
 import jadx.gui.device.debugger.DbgUtils;
-import jadx.gui.settings.JadxSettings;
+import jadx.gui.jobs.IBackgroundTask;
+import jadx.gui.jobs.LoadTask;
 import jadx.gui.treemodel.JClass;
 import jadx.gui.treemodel.JNode;
 import jadx.gui.treemodel.TextNode;
-import jadx.gui.ui.ContentPanel;
-import jadx.gui.utils.NLS;
+import jadx.gui.ui.codearea.sync.CodeAreaSyncee;
+import jadx.gui.ui.codearea.sync.CodeAreaSyncer;
+import jadx.gui.ui.codearea.sync.CodeAreaSyncerAbstractFactory;
+import jadx.gui.ui.codearea.sync.SmaliSyncer;
+import jadx.gui.ui.panel.ContentPanel;
 import jadx.gui.utils.UiUtils;
 
-public final class SmaliArea extends AbstractCodeArea {
+public final class SmaliArea extends AbstractCodeArea implements CodeAreaSyncerAbstractFactory, CodeAreaSyncee {
+	private static final Logger LOG = LoggerFactory.getLogger(SmaliArea.class);
+
 	private static final long serialVersionUID = 1334485631870306494L;
 
-	private static final Icon ICON_BREAKPOINT = UiUtils.openIcon("breakpoint");
-	private static final Icon ICON_BREAKPOINT_DISABLED = UiUtils.openIcon("breakpoint_disabled");
-	private static final Color BREAKPOINT_LINE_COLOR = Color.decode("#FF986E");
-	private static final Color DEBUG_LINE_COLOR = Color.decode("#80B4FF");
+	private static final Icon ICON_BREAKPOINT = UiUtils.openSvgIcon("debugger/db_set_breakpoint");
+	private static final Icon ICON_BREAKPOINT_DISABLED = UiUtils.openSvgIcon("debugger/db_disabled_breakpoint");
+	private static final Color BREAKPOINT_LINE_COLOR = Color.decode("#ad103c");
+	private static final Color DEBUG_LINE_COLOR = Color.decode("#9c1138");
 
 	private final JNode textNode;
-	private final JCheckBoxMenuItem cbUseSmaliV2;
-	private boolean curVersion = false;
-	private SmaliModel model;
+	private final SmaliModel model;
 
-	SmaliArea(ContentPanel contentPanel) {
-		super(contentPanel);
+	SmaliArea(ContentPanel contentPanel, JClass node, boolean showBytecode) {
+		super(contentPanel, node);
+		setCodeFoldingEnabled(true);
 		this.textNode = new TextNode(node.getName());
-
-		cbUseSmaliV2 = new JCheckBoxMenuItem(NLS.str("popup.bytecode_col"),
-				shouldUseSmaliPrinterV2());
-		cbUseSmaliV2.setAction(new AbstractAction(NLS.str("popup.bytecode_col")) {
-			private static final long serialVersionUID = -1111111202103170737L;
-
-			@Override
-			public void actionPerformed(ActionEvent e) {
-				JadxSettings settings = getContentPanel().getTabbedPane().getMainWindow().getSettings();
-				settings.setSmaliAreaShowBytecode(!settings.getSmaliAreaShowBytecode());
-				contentPanel.getTabbedPane().getOpenTabs().values().forEach(v -> {
-					if (v instanceof ClassCodeContentPanel) {
-						switchModel();
-						((ClassCodeContentPanel) v).getSmaliCodeArea().refresh();
-					}
-				});
-				settings.sync();
-			}
-		});
-		getPopupMenu().add(cbUseSmaliV2);
-		switchModel();
+		this.model = showBytecode ? new DebugModel() : new NormalModel(this);
+		setUnLoaded();
+		load();
 	}
 
 	@Override
-	public void load() {
-		if (getText().isEmpty() || curVersion != shouldUseSmaliPrinterV2()) {
-			curVersion = shouldUseSmaliPrinterV2();
-			model.load();
-			setCaretPosition(0);
-		}
+	public IBackgroundTask getLoadTask() {
+		return new LoadTask<>(
+				model::loadCode,
+				code -> {
+					model.loadUI(code);
+					setCaretPosition(0);
+					setLoaded();
+				});
+	}
+
+	@Override
+	public ICodeInfo getCodeInfo() {
+		return ICodeInfo.EMPTY;
 	}
 
 	@Override
@@ -86,27 +97,21 @@ public final class SmaliArea extends AbstractCodeArea {
 		return textNode;
 	}
 
-	private void switchModel() {
-		if (model != null) {
-			model.unload();
-		}
-		model = shouldUseSmaliPrinterV2() ? new DebugModel() : new NormalModel();
+	public boolean isShowingDalvikBytecode() {
+		return model instanceof DebugModel;
+	}
+
+	public JClass getJClass() {
+		return (JClass) node;
 	}
 
 	public void scrollToDebugPos(int pos) {
-		getContentPanel().getTabbedPane().getMainWindow()
-				.getSettings().setSmaliAreaShowBytecode(true); // don't sync when it's set programmatically.
-		cbUseSmaliV2.setState(shouldUseSmaliPrinterV2());
-		if (!(model instanceof DebugModel)) {
-			switchModel();
-			refresh();
-		}
 		model.togglePosHighlight(pos);
 	}
 
 	@Override
 	public Font getFont() {
-		if (model == null) {
+		if (model == null || isDisposed()) {
 			return super.getFont();
 		}
 		return model.getFont();
@@ -114,15 +119,13 @@ public final class SmaliArea extends AbstractCodeArea {
 
 	@Override
 	public Font getFontForTokenType(int type) {
-		return model.getFont();
-	}
-
-	private boolean shouldUseSmaliPrinterV2() {
-		return getContentPanel().getTabbedPane().getMainWindow().getSettings().getSmaliAreaShowBytecode();
+		return getFont();
 	}
 
 	private abstract class SmaliModel {
-		abstract void load();
+		abstract String loadCode();
+
+		abstract void loadUI(String code);
 
 		abstract void unload();
 
@@ -142,46 +145,52 @@ public final class SmaliArea extends AbstractCodeArea {
 	}
 
 	private class NormalModel extends SmaliModel {
-
-		public NormalModel() {
-			Theme theme = getContentPanel().getTabbedPane().getMainWindow().getEditorTheme();
-			setSyntaxScheme(theme.scheme);
-			setSyntaxEditingStyle(SyntaxConstants.SYNTAX_STYLE_JAVA);
+		private NormalModel(SmaliArea smaliArea) {
+			getContentPanel().getMainWindow().getEditorThemeManager().apply(smaliArea);
+			setSyntaxEditingStyle(SYNTAX_STYLE_SMALI);
 		}
 
 		@Override
-		public void load() {
-			setText(node.getSmali());
+		public String loadCode() {
+			return getJClass().getSmali();
+		}
+
+		@Override
+		public void loadUI(String code) {
+			setText(code);
 		}
 
 		@Override
 		public void unload() {
-
 		}
 	}
 
 	private class DebugModel extends SmaliModel {
 		private KeyStroke bpShortcut;
-		private final String keyID = "set a break point";
 		private Gutter gutter;
 		private Object runningHighlightTag = null; // running line
 		private final SmaliV2Style smaliV2Style = new SmaliV2Style(SmaliArea.this);
 		private final Map<Integer, BreakpointLine> bpMap = new HashMap<>();
-		private final PropertyChangeListener listener = evt -> {
+		private final PropertyChangeListener schemeListener = evt -> {
 			if (smaliV2Style.refreshTheme()) {
 				setSyntaxScheme(smaliV2Style);
 			}
 		};
 
-		public DebugModel() {
+		private DebugModel() {
 			loadV2Style();
 			setSyntaxEditingStyle(SyntaxConstants.SYNTAX_STYLE_ASSEMBLER_6502);
-			addPropertyChangeListener(SYNTAX_SCHEME_PROPERTY, listener);
+			addPropertyChangeListener(SYNTAX_SCHEME_PROPERTY, schemeListener);
 			regBreakpointEvents();
 		}
 
 		@Override
-		public void load() {
+		String loadCode() {
+			return DbgUtils.getSmaliCode(((JClass) node).getCls().getClassNode());
+		}
+
+		@Override
+		void loadUI(String code) {
 			if (gutter == null) {
 				gutter = RSyntaxUtilities.getGutter(SmaliArea.this);
 				gutter.setBookmarkingEnabled(true);
@@ -189,20 +198,18 @@ public final class SmaliArea extends AbstractCodeArea {
 				Font baseFont = SmaliArea.super.getFont();
 				gutter.setLineNumberFont(baseFont.deriveFont(baseFont.getSize2D() - 1.0f));
 			}
-			setText(DbgUtils.getSmaliCode(((JClass) node).getCls().getClassNode()));
+			setText(code);
 			loadV2Style();
 			loadBreakpoints();
 		}
 
 		@Override
 		public void unload() {
-			removePropertyChangeListener(listener);
+			removePropertyChangeListener(schemeListener);
 			removeLineHighlight(runningHighlightTag);
-			UiUtils.removeKeyBinding(SmaliArea.this, bpShortcut, keyID);
+			UiUtils.removeKeyBinding(SmaliArea.this, bpShortcut, "set a break point");
 			BreakpointManager.removeListener((JClass) node);
-			bpMap.forEach((k, v) -> {
-				v.remove();
-			});
+			bpMap.forEach((k, v) -> v.remove());
 		}
 
 		@Override
@@ -244,8 +251,8 @@ public final class SmaliArea extends AbstractCodeArea {
 			int line;
 			try {
 				line = getLineOfOffset(pos);
-			} catch (BadLocationException badLocationException) {
-				badLocationException.printStackTrace();
+			} catch (BadLocationException e) {
+				LOG.error("Failed to get line by offset: {}", pos, e);
 				return;
 			}
 			BreakpointLine bpLine = bpMap.remove(line);
@@ -271,7 +278,7 @@ public final class SmaliArea extends AbstractCodeArea {
 				int line = getLineOfOffset(pos);
 				runningHighlightTag = addLineHighlight(line, DEBUG_LINE_COLOR);
 			} catch (BadLocationException e) {
-				e.printStackTrace();
+				LOG.error("Failed to get line by offset: {}", pos, e);
 			}
 		}
 
@@ -280,36 +287,31 @@ public final class SmaliArea extends AbstractCodeArea {
 				int line = getLineOfOffset(pos);
 				bpMap.computeIfAbsent(line, k -> new BreakpointLine(line)).setDisabled(true);
 			} catch (BadLocationException e) {
-				e.printStackTrace();
+				LOG.error("Failed to get line by offset: {}", pos, e);
 			}
 		}
 
 		private class SmaliV2Style extends SyntaxScheme {
-
-			Theme curTheme;
-
 			public SmaliV2Style(SmaliArea smaliArea) {
 				super(true);
-				curTheme = smaliArea.getContentPanel().getTabbedPane().getMainWindow().getEditorTheme();
+				smaliArea.getContentPanel().getMainWindow().getEditorThemeManager().apply(smaliArea);
 				updateTheme();
 			}
 
 			public Font getFont() {
-				return getContentPanel().getTabbedPane().getMainWindow().getSettings().getSmaliFont();
+				return getContentPanel().getMainWindow().getSettings().getSmaliFont();
 			}
 
 			public boolean refreshTheme() {
-				Theme theme = getContentPanel().getTabbedPane().getMainWindow().getEditorTheme();
-				boolean refresh = theme != curTheme;
+				boolean refresh = getSyntaxScheme() != this;
 				if (refresh) {
-					curTheme = theme;
 					updateTheme();
 				}
 				return refresh;
 			}
 
 			private void updateTheme() {
-				Style[] mainStyles = curTheme.scheme.getStyles();
+				Style[] mainStyles = getSyntaxScheme().getStyles();
 				Style[] styles = new Style[mainStyles.length];
 				for (int i = 0; i < mainStyles.length; i++) {
 					Style mainStyle = mainStyles[i];
@@ -331,7 +333,7 @@ public final class SmaliArea extends AbstractCodeArea {
 
 			@Override
 			public void restoreDefaults(Font baseFont, boolean fontStyles) {
-				// Note: it's a hook for continue using the editor theme, better don't remove it.
+				// Note: it's a hook for continuing using the editor theme, better don't remove it.
 			}
 		}
 
@@ -347,7 +349,7 @@ public final class SmaliArea extends AbstractCodeArea {
 			}
 
 			void remove() {
-				gutter.removeTrackingIcon(iconInfo);
+				safeRemoveTrackingIcon(iconInfo);
 				if (!this.disabled) {
 					removeLineHighlight(highlightTag);
 				}
@@ -356,28 +358,35 @@ public final class SmaliArea extends AbstractCodeArea {
 			void setDisabled(boolean disabled) {
 				if (disabled) {
 					if (!this.disabled) {
-						gutter.removeTrackingIcon(iconInfo);
+						safeRemoveTrackingIcon(iconInfo);
 						removeLineHighlight(highlightTag);
 						try {
 							iconInfo = gutter.addLineTrackingIcon(line, ICON_BREAKPOINT_DISABLED);
 						} catch (BadLocationException e) {
-							e.printStackTrace();
+							LOG.error("Failed to add line tracking icon", e);
 						}
 					}
 				} else {
 					if (this.disabled) {
-						gutter.removeTrackingIcon(this.iconInfo);
+						safeRemoveTrackingIcon(this.iconInfo);
 						try {
 							iconInfo = gutter.addLineTrackingIcon(line, ICON_BREAKPOINT);
 							highlightTag = addLineHighlight(line, BREAKPOINT_LINE_COLOR);
 						} catch (BadLocationException e) {
-							e.printStackTrace();
+							LOG.error("Failed to remove line tracking icon", e);
 						}
 					}
 				}
 				this.disabled = disabled;
 			}
 		}
+
+		private void safeRemoveTrackingIcon(GutterIconInfo iconInfo) {
+			if (gutter != null && iconInfo != null) {
+				gutter.removeTrackingIcon(iconInfo);
+			}
+		}
+
 	}
 
 	@Override
@@ -397,7 +406,7 @@ public final class SmaliArea extends AbstractCodeArea {
 
 							@Override
 							public void mousePressed(MouseEvent e) {
-								int offs = textArea.viewToModel(e.getPoint());
+								int offs = textArea.viewToModel2D(e.getPoint());
 								if (offs > -1) {
 									model.setBreakpoint(offs);
 								}
@@ -407,5 +416,15 @@ public final class SmaliArea extends AbstractCodeArea {
 				};
 			}
 		};
+	}
+
+	@Override
+	public CodeAreaSyncer createCodeAreaSyncer() {
+		return new SmaliSyncer(this);
+	}
+
+	@Override
+	public boolean sync(CodeAreaSyncer codeAreaSyncer) {
+		return codeAreaSyncer.syncTo(this);
 	}
 }

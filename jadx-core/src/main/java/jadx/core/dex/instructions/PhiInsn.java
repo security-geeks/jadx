@@ -12,9 +12,9 @@ import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.utils.InsnRemover;
-import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public final class PhiInsn extends InsnNode {
@@ -44,6 +44,9 @@ public final class PhiInsn extends InsnNode {
 		if (blockBinds.contains(pred)) {
 			throw new JadxRuntimeException("Duplicate predecessors in PHI insn: " + pred + ", " + this);
 		}
+		if (pred == null) {
+			throw new JadxRuntimeException("Null bind block in PHI insn: " + this);
+		}
 		super.addArg(arg);
 		blockBinds.add(pred);
 	}
@@ -65,6 +68,15 @@ public final class PhiInsn extends InsnNode {
 	@NotNull
 	public RegisterArg getArg(int n) {
 		return (RegisterArg) super.getArg(n);
+	}
+
+	public @Nullable RegisterArg getArgByBlock(BlockNode block) {
+		for (int i = 0; i < blockBinds.size(); i++) {
+			if (blockBinds.get(i) == block) {
+				return getArg(i);
+			}
+		}
+		return null;
 	}
 
 	@Override
@@ -97,6 +109,18 @@ public final class PhiInsn extends InsnNode {
 			}
 		}
 		return null;
+	}
+
+	@Nullable
+	public RegisterArg getArgByBlock(IBlock block) {
+		if (getArgsCount() == 0) {
+			return null;
+		}
+		int index = blockBinds.indexOf(block);
+		if (index == -1) {
+			return null;
+		}
+		return getArg(index);
 	}
 
 	@Override
@@ -134,7 +158,6 @@ public final class PhiInsn extends InsnNode {
 
 	@Override
 	public String toString() {
-		return "PHI: " + getResult() + " = " + Utils.listToString(getArguments())
-				+ " binds: " + blockBinds;
+		return baseString() + " binds: " + blockBinds + attributesString();
 	}
 }

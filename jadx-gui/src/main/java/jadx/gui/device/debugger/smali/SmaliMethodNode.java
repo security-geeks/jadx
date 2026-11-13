@@ -1,12 +1,16 @@
 package jadx.gui.device.debugger.smali;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.InsnNode;
 
-class SmaliMethodNode {
+public class SmaliMethodNode {
 	private Map<Long, InsnNode> nodes; // codeOffset: InsnNode
 	private List<SmaliRegister> regList;
 	private int[] insnPos;
@@ -23,6 +27,13 @@ class SmaliMethodNode {
 		return this.regCount;
 	}
 
+	/**
+	 * Returns the line mapping of the:
+	 * 'output disassembled smali file line index' to 'dex instruction position code offset'
+	 * The value is the same as {@link InsnNode#getOffset()}
+	 *
+	 * @return the line mapping
+	 */
 	public Map<Integer, Integer> getLineMapping() {
 		return lineMapping;
 	}
@@ -90,7 +101,6 @@ class SmaliMethodNode {
 	protected void setParamReg(int regNum, String name) {
 		SmaliRegister r = regList.get(regNum);
 		r.setParam(name);
-		r.setStartOffset(-1);
 	}
 
 	protected void setParamRegStart(int paramRegStart) {

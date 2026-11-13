@@ -6,59 +6,35 @@ import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
-import jadx.gui.jobs.DecompileJob;
-import jadx.gui.jobs.IndexJob;
-import jadx.gui.settings.JadxSettings;
-import jadx.gui.treemodel.JRoot;
-import jadx.gui.ui.SearchDialog;
-import jadx.gui.utils.search.CommentsIndex;
-import jadx.gui.utils.search.TextSearchIndex;
+import jadx.gui.JadxWrapper;
+import jadx.gui.ui.dialog.SearchDialog;
+import jadx.gui.utils.pkgs.PackageHelper;
 
 public class CacheObject {
+	private final JadxWrapper wrapper;
+	private final JNodeCache jNodeCache;
+	private final PackageHelper packageHelper;
 
-	private DecompileJob decompileJob;
-	private IndexJob indexJob;
-
-	private TextSearchIndex textIndex;
-	private CodeUsageInfo usageInfo;
-	private CommentsIndex commentsIndex;
 	private String lastSearch;
-	private JNodeCache jNodeCache;
 	private Map<SearchDialog.SearchPreset, Set<SearchDialog.SearchOptions>> lastSearchOptions;
+	private String lastSearchPackage;
+	private int maxPkgLength;
 
-	private JRoot jRoot;
-	private JadxSettings settings;
+	private volatile boolean fullDecompilationFinished;
 
-	public CacheObject() {
+	public CacheObject(JadxWrapper wrapper) {
+		this.wrapper = wrapper;
+		this.jNodeCache = new JNodeCache(wrapper);
+		this.packageHelper = new PackageHelper(wrapper, jNodeCache);
 		reset();
 	}
 
 	public void reset() {
-		jRoot = null;
-		settings = null;
-		decompileJob = null;
-		indexJob = null;
-		textIndex = null;
 		lastSearch = null;
-		jNodeCache = new JNodeCache();
-		usageInfo = null;
+		jNodeCache.reset();
 		lastSearchOptions = new HashMap<>();
-	}
-
-	public DecompileJob getDecompileJob() {
-		return decompileJob;
-	}
-
-	public void setDecompileJob(DecompileJob decompileJob) {
-		this.decompileJob = decompileJob;
-	}
-
-	public TextSearchIndex getTextIndex() {
-		return textIndex;
-	}
-
-	public void setTextIndex(TextSearchIndex textIndex) {
-		this.textIndex = textIndex;
+		lastSearchPackage = null;
+		fullDecompilationFinished = false;
 	}
 
 	@Nullable
@@ -66,33 +42,25 @@ public class CacheObject {
 		return lastSearch;
 	}
 
+	@Nullable
+	public String getLastSearchPackage() {
+		return lastSearchPackage;
+	}
+
 	public void setLastSearch(String lastSearch) {
 		this.lastSearch = lastSearch;
 	}
 
-	@Nullable
-	public CodeUsageInfo getUsageInfo() {
-		return usageInfo;
+	public void setLastSearchPackage(String lastSearchPackage) {
+		this.lastSearchPackage = lastSearchPackage;
 	}
 
-	public void setUsageInfo(@Nullable CodeUsageInfo usageInfo) {
-		this.usageInfo = usageInfo;
+	public int getMaxPkgLength() {
+		return maxPkgLength;
 	}
 
-	public CommentsIndex getCommentsIndex() {
-		return commentsIndex;
-	}
-
-	public void setCommentsIndex(CommentsIndex commentsIndex) {
-		this.commentsIndex = commentsIndex;
-	}
-
-	public IndexJob getIndexJob() {
-		return indexJob;
-	}
-
-	public void setIndexJob(IndexJob indexJob) {
-		this.indexJob = indexJob;
+	public void setMaxPkgLength(int maxPkgLength) {
+		this.maxPkgLength = maxPkgLength;
 	}
 
 	public JNodeCache getNodeCache() {
@@ -103,19 +71,15 @@ public class CacheObject {
 		return lastSearchOptions;
 	}
 
-	public void setJadxSettings(JadxSettings settings) {
-		this.settings = settings;
+	public PackageHelper getPackageHelper() {
+		return packageHelper;
 	}
 
-	public JadxSettings getJadxSettings() {
-		return this.settings;
+	public boolean isFullDecompilationFinished() {
+		return fullDecompilationFinished;
 	}
 
-	public JRoot getJRoot() {
-		return jRoot;
-	}
-
-	public void setJRoot(JRoot jRoot) {
-		this.jRoot = jRoot;
+	public void setFullDecompilationFinished(boolean fullDecompilationFinished) {
+		this.fullDecompilationFinished = fullDecompilationFinished;
 	}
 }

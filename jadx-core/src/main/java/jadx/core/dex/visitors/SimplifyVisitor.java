@@ -38,6 +38,7 @@ import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.dex.regions.conditions.IfCondition;
 import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
+import jadx.core.dex.visitors.typeinference.TypeCompareEnum;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnList;
 import jadx.core.utils.InsnRemover;
@@ -71,7 +72,7 @@ public class SimplifyVisitor extends AbstractVisitor {
 				changed = true;
 			}
 		}
-		if (changed) {
+		if (changed || mth.contains(AFlag.REQUEST_CODE_SHRINK)) {
 			CodeShrinkVisitor.shrinkMethod(mth);
 		}
 	}
@@ -82,9 +83,8 @@ public class SimplifyVisitor extends AbstractVisitor {
 		for (int i = 0; i < list.size(); i++) {
 			InsnNode insn = list.get(i);
 			int insnCount = list.size();
-			InsnNode modInsn = simplifyInsn(mth, insn);
+			InsnNode modInsn = simplifyInsn(mth, insn, null);
 			if (modInsn != null) {
-				modInsn.rebindArgs();
 				if (i < list.size() && list.get(i) == insn) {
 					list.set(i, modInsn);
 				} else {
@@ -94,6 +94,8 @@ public class SimplifyVisitor extends AbstractVisitor {
 					}
 					list.set(idx, modInsn);
 				}
+				InsnRemover.unbindInsn(mth, insn);
+				modInsn.rebindArgs();
 				if (list.size() < insnCount) {
 					// some insns removed => restart block processing
 					simplifyBlock(mth, block);
@@ -110,20 +112,20 @@ public class SimplifyVisitor extends AbstractVisitor {
 		for (InsnArg arg : insn.getArguments()) {
 			if (arg.isInsnWrap()) {
 				InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
-				InsnNode replaceInsn = simplifyInsn(mth, wrapInsn);
+				InsnNode replaceInsn = simplifyInsn(mth, wrapInsn, insn);
 				if (replaceInsn != null) {
 					arg.wrapInstruction(mth, replaceInsn);
-					InsnRemover.unbindInsn(mth, wrapInsn);
 					changed = true;
 				}
 			}
 		}
 		if (changed) {
 			insn.rebindArgs();
+			mth.add(AFlag.REQUEST_CODE_SHRINK);
 		}
 	}
 
-	private InsnNode simplifyInsn(MethodNode mth, InsnNode insn) {
+	private InsnNode simplifyInsn(MethodNode mth, InsnNode insn, @Nullable InsnNode parentInsn) {
 		if (insn.contains(AFlag.DONT_GENERATE)) {
 			return null;
 		}
@@ -133,10 +135,10 @@ public class SimplifyVisitor extends AbstractVisitor {
 				return simplifyArith((ArithNode) insn);
 
 			case IF:
-				simplifyIf((IfNode) insn);
+				simplifyIf(mth, (IfNode) insn);
 				break;
 			case TERNARY:
-				simplifyTernary((TernaryInsn) insn);
+				simplifyTernary(mth, (TernaryInsn) insn);
 				break;
 
 			case INVOKE:
@@ -146,8 +148,9 @@ public class SimplifyVisitor extends AbstractVisitor {
 			case SPUT:
 				return convertFieldArith(mth, insn);
 
+			case CAST:
 			case CHECK_CAST:
-				return processCast(mth, (IndexInsnNode) insn);
+				return processCast(mth, (IndexInsnNode) insn, parentInsn);
 
 			case MOVE:
 				InsnArg firstArg = insn.getArg(0);
@@ -186,7 +189,7 @@ public class SimplifyVisitor extends AbstractVisitor {
 							return null;
 						}
 						arr[i] = (byte) ((LiteralArg) arrArg).getLiteral();
-						if (NameMapper.isPrintableChar(arr[i])) {
+						if (NameMapper.isPrintableChar((char) arr[i])) {
 							printable++;
 						}
 					}
@@ -212,7 +215,7 @@ public class SimplifyVisitor extends AbstractVisitor {
 		return null;
 	}
 
-	private static InsnNode processCast(MethodNode mth, IndexInsnNode castInsn) {
+	private static InsnNode processCast(MethodNode mth, IndexInsnNode castInsn, @Nullable InsnNode parentInsn) {
 		if (castInsn.contains(AFlag.EXPLICIT_CAST)) {
 			return null;
 		}
@@ -228,15 +231,34 @@ public class SimplifyVisitor extends AbstractVisitor {
 		}
 
 		ArgType castToType = (ArgType) castInsn.getIndex();
+		if (isArithWideUpCast(parentInsn, argType, castToType)) {
+			return null;
+		}
 		if (!ArgType.isCastNeeded(mth.root(), argType, castToType)
-				|| isCastDuplicate(castInsn)) {
+				|| isCastDuplicate(castInsn)
+				|| shadowedByOuterCast(mth.root(), castToType, parentInsn)) {
 			InsnNode insnNode = new InsnNode(InsnType.MOVE, 1);
 			insnNode.setOffset(castInsn.getOffset());
-			insnNode.setResult(castInsn.getResult());
-			insnNode.addArg(castArg);
+			insnNode.setResult(InsnNode.duplicateArg(castInsn.getResult()));
+			insnNode.addArg(castArg.duplicate());
 			return insnNode;
 		}
 		return null;
+	}
+
+	/**
+	 * Keep cast to wide types in arith instructions,
+	 * because arguments type determine instruction used in result bytecode.
+	 * Example: (long) i << 32 - without 'long' cast will be used 'int shift' instruction and result
+	 * will be incorrect
+	 */
+	private static boolean isArithWideUpCast(@Nullable InsnNode parentInsn, ArgType argType, ArgType castToType) {
+		if (parentInsn != null
+				&& parentInsn.getType() == InsnType.ARITH
+				&& argType.isPrimitive() && castToType.isPrimitive()) {
+			return castToType.getRegCount() > argType.getRegCount();
+		}
+		return false;
 	}
 
 	private static boolean isCastDuplicate(IndexInsnNode castInsn) {
@@ -254,16 +276,30 @@ public class SimplifyVisitor extends AbstractVisitor {
 		return false;
 	}
 
+	private static boolean shadowedByOuterCast(RootNode root, ArgType castType, @Nullable InsnNode parentInsn) {
+		if (parentInsn != null && parentInsn.getType() == InsnType.CAST) {
+			ArgType parentCastType = (ArgType) ((IndexInsnNode) parentInsn).getIndex();
+			TypeCompareEnum result = root.getTypeCompare().compareTypes(parentCastType, castType);
+			return result.isNarrow();
+		}
+		return false;
+	}
+
 	/**
 	 * Simplify 'cmp' instruction in if condition
 	 */
-	private static void simplifyIf(IfNode insn) {
+	private static void simplifyIf(MethodNode mth, IfNode insn) {
 		InsnArg f = insn.getArg(0);
 		if (f.isInsnWrap()) {
 			InsnNode wi = ((InsnWrapArg) f).getWrapInsn();
 			if (wi.getType() == InsnType.CMP_L || wi.getType() == InsnType.CMP_G) {
 				if (insn.getArg(1).isZeroLiteral()) {
-					insn.changeCondition(insn.getOp(), wi.getArg(0), wi.getArg(1));
+					if (IfCondition.isFloatCmp(wi)) {
+						// keep 'cmp' to not lose NaN handling, see ConditionGen.addFloatCmpCompare()
+						return;
+					}
+					insn.changeCondition(insn.getOp(), wi.getArg(0).duplicate(), wi.getArg(1).duplicate());
+					InsnRemover.unbindInsn(mth, wi);
 				} else {
 					LOG.warn("TODO: cmp {}", insn);
 				}
@@ -274,10 +310,10 @@ public class SimplifyVisitor extends AbstractVisitor {
 	/**
 	 * Simplify condition in ternary operation
 	 */
-	private static void simplifyTernary(TernaryInsn insn) {
+	private static void simplifyTernary(MethodNode mth, TernaryInsn insn) {
 		IfCondition condition = insn.getCondition();
 		if (condition.isCompare()) {
-			simplifyIf(condition.getCompare().getInsn());
+			simplifyIf(mth, condition.getCompare().getInsn());
 		} else {
 			insn.simplifyCondition();
 		}
@@ -380,33 +416,22 @@ public class SimplifyVisitor extends AbstractVisitor {
 				args.add(arg);
 			}
 
-			boolean stringArgFound = false;
-			for (InsnArg arg : args) {
-				if (arg.getType().equals(ArgType.STRING)) {
-					stringArgFound = true;
-					break;
-				}
-			}
-			if (!stringArgFound) {
-				mth.addDebugComment("TODO: convert one arg to string using `String.valueOf()`, args: " + args);
-				return null;
-			}
-
 			// all check passed
-			removeStringBuilderInsns(mth, toStrInsn, chain);
-
 			List<InsnArg> dupArgs = Utils.collectionMap(args, InsnArg::duplicate);
 			List<InsnArg> simplifiedArgs = concatConstArgs(dupArgs);
 			InsnNode concatInsn = new InsnNode(InsnType.STR_CONCAT, simplifiedArgs);
-			concatInsn.setResult(toStrInsn.getResult());
 			concatInsn.add(AFlag.SYNTHETIC);
+			if (toStrInsn.getResult() == null && !toStrInsn.contains(AFlag.WRAPPED)) {
+				// string concat without assign to variable will cause compilation error
+				concatInsn.setResult(mth.makeSyntheticRegArg(ArgType.STRING));
+			} else {
+				concatInsn.setResult(toStrInsn.getResult());
+			}
 			concatInsn.copyAttributesFrom(toStrInsn);
-			concatInsn.remove(AFlag.DONT_GENERATE);
-			concatInsn.remove(AFlag.REMOVE);
-			checkResult(mth, concatInsn);
+			removeStringBuilderInsns(mth, toStrInsn, chain);
 			return concatInsn;
 		} catch (Exception e) {
-			LOG.warn("Can't convert string concatenation: {} insn: {}", mth, toStrInsn, e);
+			mth.addWarnComment("String concatenation convert failed", e);
 		}
 		return null;
 	}
@@ -472,17 +497,6 @@ public class SimplifyVisitor extends AbstractVisitor {
 		return null;
 	}
 
-	/* String concat without assign to variable will cause compilation error */
-	private static void checkResult(MethodNode mth, InsnNode concatInsn) {
-		if (concatInsn.getResult() == null) {
-			RegisterArg resArg = InsnArg.reg(0, ArgType.STRING);
-			SSAVar ssaVar = mth.makeNewSVar(resArg);
-			InitCodeVariables.initCodeVar(ssaVar);
-			ssaVar.setType(ArgType.STRING);
-			concatInsn.setResult(resArg);
-		}
-	}
-
 	/**
 	 * Remove and unbind all instructions with StringBuilder
 	 */
@@ -531,32 +545,50 @@ public class SimplifyVisitor extends AbstractVisitor {
 		if (arith.getArgsCount() != 2) {
 			return null;
 		}
-		InsnArg litArg = null;
+		LiteralArg litArg = null;
 		InsnArg secondArg = arith.getArg(1);
 		if (secondArg.isInsnWrap()) {
 			InsnNode wr = ((InsnWrapArg) secondArg).getWrapInsn();
 			if (wr.getType() == InsnType.CONST) {
-				litArg = wr.getArg(0);
+				InsnArg arg = wr.getArg(0);
+				if (arg.isLiteral()) {
+					litArg = (LiteralArg) arg;
+				}
 			}
 		} else if (secondArg.isLiteral()) {
-			litArg = secondArg;
+			litArg = (LiteralArg) secondArg;
 		}
-		if (litArg != null) {
-			long lit = ((LiteralArg) litArg).getLiteral();
-			// fix 'c + (-1)' => 'c - (1)'
-			if (arith.getOp() == ArithOp.ADD && lit < 0) {
-				return new ArithNode(ArithOp.SUB,
-						arith.getResult(), arith.getArg(0),
-						InsnArg.lit(-lit, litArg.getType()));
-			}
-			InsnArg firstArg = arith.getArg(0);
-			if (arith.getOp() == ArithOp.XOR && firstArg.getType() == ArgType.BOOLEAN
-					&& (lit == 0 || lit == 1)) {
-				InsnNode node = new InsnNode(lit == 0 ? InsnType.MOVE : InsnType.NOT, 1);
-				node.setResult(arith.getResult());
-				node.addArg(firstArg);
-				return node;
-			}
+		if (litArg == null) {
+			return null;
+		}
+		switch (arith.getOp()) {
+			case ADD:
+				// fix 'c + (-1)' to 'c - (1)'
+				if (litArg.isNegative()) {
+					LiteralArg negLitArg = litArg.negate();
+					if (negLitArg != null) {
+						RegisterArg resArg = InsnNode.duplicateArg(arith.getResult());
+						ArithNode newInsn = new ArithNode(ArithOp.SUB, resArg, arith.getArg(0).duplicate(), negLitArg);
+						newInsn.copyAttributesFrom(arith);
+						newInsn.setOffset(arith.getOffset());
+						return newInsn;
+					}
+				}
+				break;
+
+			case XOR:
+				// simplify xor on boolean
+				InsnArg firstArg = arith.getArg(0);
+				long lit = litArg.getLiteral();
+				if (firstArg.getType() == ArgType.BOOLEAN && (lit == 0 || lit == 1)) {
+					InsnNode newInsn = new InsnNode(lit == 0 ? InsnType.MOVE : InsnType.NOT, 1);
+					newInsn.setResult(InsnNode.duplicateArg(arith.getResult()));
+					newInsn.addArg(firstArg.duplicate());
+					newInsn.copyAttributesFrom(arith);
+					newInsn.setOffset(arith.getOffset());
+					return newInsn;
+				}
+				break;
 		}
 		return null;
 	}
@@ -602,14 +634,22 @@ public class SimplifyVisitor extends AbstractVisitor {
 			}
 			if (wrapType == InsnType.ARITH) {
 				ArithNode ar = (ArithNode) wrap;
-				return ArithNode.oneArgOp(ar.getOp(), fArg, ar.getArg(1));
+				ArithNode newInsn = ArithNode.oneArgOp(ar.getOp(), fArg, ar.getArg(1).duplicate());
+				newInsn.copyAttributesFrom(insn);
+				newInsn.setOffset(insn.getOffset());
+				return newInsn;
 			}
 			int argsCount = wrap.getArgsCount();
 			InsnNode concat = new InsnNode(InsnType.STR_CONCAT, argsCount - 1);
 			for (int i = 1; i < argsCount; i++) {
-				concat.addArg(wrap.getArg(i));
+				concat.addArg(wrap.getArg(i).duplicate());
 			}
-			return ArithNode.oneArgOp(ArithOp.ADD, fArg, InsnArg.wrapArg(concat));
+			InsnArg concatArg = InsnArg.wrapArg(concat);
+			concatArg.setType(ArgType.STRING);
+			ArithNode newInsn = ArithNode.oneArgOp(ArithOp.ADD, fArg, concatArg);
+			newInsn.copyAttributesFrom(wrap);
+			newInsn.setOffset(wrap.getOffset());
+			return newInsn;
 		} catch (Exception e) {
 			LOG.debug("Can't convert field arith insn: {}, mth: {}", insn, mth, e);
 		}

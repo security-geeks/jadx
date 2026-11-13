@@ -1,6 +1,6 @@
 package jadx.gui.utils;
 
-import java.awt.*;
+import java.awt.Rectangle;
 import java.io.IOException;
 
 import com.google.gson.TypeAdapter;
@@ -10,7 +10,7 @@ import com.google.gson.stream.JsonWriter;
 
 public class RectangleTypeAdapter {
 
-	private static final TypeAdapter<Rectangle> SINGLETON = new TypeAdapter<Rectangle>() {
+	private static final TypeAdapter<Rectangle> SINGLETON = new TypeAdapter<>() {
 		@Override
 		public void write(JsonWriter out, Rectangle value) throws IOException {
 			if (value == null) {

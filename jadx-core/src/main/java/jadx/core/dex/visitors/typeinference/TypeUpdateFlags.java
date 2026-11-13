@@ -1,39 +1,61 @@
 package jadx.core.dex.visitors.typeinference;
 
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Set;
+
+import static jadx.core.dex.visitors.typeinference.TypeUpdateFlags.FlagsEnum.ALLOW_WIDER;
+import static jadx.core.dex.visitors.typeinference.TypeUpdateFlags.FlagsEnum.IGNORE_SAME;
+import static jadx.core.dex.visitors.typeinference.TypeUpdateFlags.FlagsEnum.IGNORE_UNKNOWN;
+import static jadx.core.dex.visitors.typeinference.TypeUpdateFlags.FlagsEnum.KEEP_GENERICS;
+
 public class TypeUpdateFlags {
+	enum FlagsEnum {
+		ALLOW_WIDER,
+		IGNORE_SAME,
+		IGNORE_UNKNOWN,
+		KEEP_GENERICS,
+	}
 
-	public static final TypeUpdateFlags FLAGS_EMPTY = new TypeUpdateFlags(false, false);
-	public static final TypeUpdateFlags FLAGS_WIDER = new TypeUpdateFlags(true, false);
-	public static final TypeUpdateFlags FLAGS_WIDER_IGNSAME = new TypeUpdateFlags(true, true);
+	static final TypeUpdateFlags FLAGS_EMPTY = build();
+	static final TypeUpdateFlags FLAGS_WIDER = build(ALLOW_WIDER);
+	static final TypeUpdateFlags FLAGS_WIDER_IGNORE_SAME = build(ALLOW_WIDER, IGNORE_SAME);
+	static final TypeUpdateFlags FLAGS_APPLY_DEBUG = build(ALLOW_WIDER, KEEP_GENERICS, IGNORE_UNKNOWN);
 
-	private final boolean allowWider;
-	private final boolean ignoreSame;
+	private final Set<FlagsEnum> flags;
 
-	private TypeUpdateFlags(boolean allowWider, boolean ignoreSame) {
-		this.allowWider = allowWider;
-		this.ignoreSame = ignoreSame;
+	private static TypeUpdateFlags build(FlagsEnum... flags) {
+		EnumSet<FlagsEnum> set;
+		if (flags.length == 0) {
+			set = EnumSet.noneOf(FlagsEnum.class);
+		} else {
+			set = EnumSet.copyOf(List.of(flags));
+		}
+		return new TypeUpdateFlags(set);
+	}
+
+	private TypeUpdateFlags(Set<FlagsEnum> flags) {
+		this.flags = flags;
 	}
 
 	public boolean isAllowWider() {
-		return allowWider;
+		return flags.contains(ALLOW_WIDER);
 	}
 
 	public boolean isIgnoreSame() {
-		return ignoreSame;
+		return flags.contains(IGNORE_SAME);
+	}
+
+	public boolean isIgnoreUnknown() {
+		return flags.contains(IGNORE_UNKNOWN);
+	}
+
+	public boolean isKeepGenerics() {
+		return flags.contains(KEEP_GENERICS);
 	}
 
 	@Override
 	public String toString() {
-		StringBuilder sb = new StringBuilder();
-		if (allowWider) {
-			sb.append("ALLOW_WIDER");
-		}
-		if (ignoreSame) {
-			if (sb.length() != 0) {
-				sb.append('|');
-			}
-			sb.append("IGNORE_SAME");
-		}
-		return sb.toString();
+		return flags.toString();
 	}
 }

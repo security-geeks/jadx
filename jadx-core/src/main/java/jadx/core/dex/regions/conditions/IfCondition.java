@@ -4,9 +4,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -16,6 +16,7 @@ import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -156,7 +157,7 @@ public final class IfCondition extends AttrNode {
 				return i;
 			}
 			if (c.getOp() == IfOp.EQ && c.getB().isFalse()) {
-				cond = not(new IfCondition(c.invert()));
+				cond = new IfCondition(Mode.NOT, Collections.singletonList(new IfCondition(c.invert())));
 			} else {
 				c.normalize();
 			}
@@ -218,7 +219,7 @@ public final class IfCondition extends AttrNode {
 		switch (wrapInsn.getType()) {
 			case CMP_L:
 			case CMP_G:
-				if (lit == 0) {
+				if (lit == 0 && !isFloatCmp(wrapInsn)) {
 					IfNode insn = c.getInsn();
 					insn.changeCondition(insn.getOp(), wrapInsn.getArg(0), wrapInsn.getArg(1));
 				}
@@ -252,8 +253,18 @@ public final class IfCondition extends AttrNode {
 		return null;
 	}
 
+	/**
+	 * Floating point 'cmp' result for NaN arguments is 1 ('cmpg') or -1 ('cmpl'),
+	 * so 'cmp(a, b) op 0' can't be replaced with 'a op b' and then inverted as a usual compare.
+	 * Such conditions are kept as is and converted at code generation.
+	 */
+	public static boolean isFloatCmp(InsnNode cmpInsn) {
+		ArgType type = cmpInsn.getArg(0).getType();
+		return type.equals(ArgType.FLOAT) || type.equals(ArgType.DOUBLE);
+	}
+
 	public List<RegisterArg> getRegisterArgs() {
-		List<RegisterArg> list = new LinkedList<>();
+		List<RegisterArg> list = new ArrayList<>();
 		if (mode == Mode.COMPARE) {
 			compare.getInsn().getRegisterArgs(list);
 		} else {
@@ -262,6 +273,42 @@ public final class IfCondition extends AttrNode {
 			}
 		}
 		return list;
+	}
+
+	public boolean replaceArg(InsnArg from, InsnArg to) {
+		if (mode == Mode.COMPARE) {
+			return compare.getInsn().replaceArg(from, to);
+		}
+		for (IfCondition arg : args) {
+			if (arg.replaceArg(from, to)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	public void visitInsns(Consumer<InsnNode> visitor) {
+		if (mode == Mode.COMPARE) {
+			compare.getInsn().visitInsns(visitor);
+		} else {
+			args.forEach(arg -> arg.visitInsns(visitor));
+		}
+	}
+
+	public List<InsnNode> collectInsns() {
+		List<InsnNode> list = new ArrayList<>();
+		visitInsns(list::add);
+		return list;
+	}
+
+	public int getSourceLine() {
+		for (InsnNode insn : collectInsns()) {
+			int line = insn.getSourceLine();
+			if (line != 0) {
+				return line;
+			}
+		}
+		return 0;
 	}
 
 	@Nullable

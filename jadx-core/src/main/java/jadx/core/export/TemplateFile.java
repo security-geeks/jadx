@@ -10,8 +10,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Function;
 
-import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -19,6 +19,8 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
 /**
  * Simple template engine
  * Syntax for replace variable with value: '{{variable}}'
+ * If value sanitizer is provided: value will be sanitized by default,
+ * to skip sanitize add '!!' before variable name: '{{!!variable}}'
  */
 public class TemplateFile {
 
@@ -36,6 +38,8 @@ public class TemplateFile {
 	private final InputStream template;
 	private final Map<String, String> values = new HashMap<>();
 
+	private @Nullable Function<String, String> valueSanitizer;
+
 	public static TemplateFile fromResources(String path) throws FileNotFoundException {
 		InputStream res = TemplateFile.class.getResourceAsStream(path);
 		if (res == null) {
@@ -49,8 +53,8 @@ public class TemplateFile {
 		this.template = in;
 	}
 
-	public void add(String name, @NotNull Object value) {
-		values.put(name, value.toString());
+	public void add(String name, @Nullable Object value) {
+		values.put(name, String.valueOf(value));
 	}
 
 	public String build() throws IOException {
@@ -64,6 +68,10 @@ public class TemplateFile {
 		try (OutputStream out = new FileOutputStream(outFile)) {
 			process(out);
 		}
+	}
+
+	public void setValueSanitizer(@Nullable Function<String, String> valueSanitizer) {
+		this.valueSanitizer = valueSanitizer;
 	}
 
 	private void process(OutputStream out) throws IOException {
@@ -116,7 +124,11 @@ public class TemplateFile {
 						parser.state = State.NONE;
 						String varName = parser.curVariable.toString();
 						parser.curVariable = new StringBuilder();
-						return processVar(varName);
+						boolean rawValue = varName.startsWith("!!");
+						if (rawValue) {
+							varName = varName.substring(2);
+						}
+						return processVar(varName, rawValue);
 				}
 				break;
 
@@ -141,11 +153,17 @@ public class TemplateFile {
 		return null;
 	}
 
-	private String processVar(String varName) {
+	private String processVar(String varName, boolean rawValue) {
 		String str = values.get(varName);
 		if (str == null) {
 			throw new JadxRuntimeException("Unknown variable: '" + varName
 					+ "' in template: " + templateName);
+		}
+		if (!rawValue) {
+			Function<String, String> sanitizer = valueSanitizer;
+			if (sanitizer != null) {
+				return sanitizer.apply(str);
+			}
 		}
 		return str;
 	}

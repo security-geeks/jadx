@@ -1,21 +1,21 @@
 package jadx.gui.ui;
 
-import java.awt.*;
+import java.awt.Color;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
-import javax.swing.*;
 import javax.swing.FocusManager;
+import javax.swing.JProgressBar;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import hu.akarnokd.rxjava2.swing.SwingSchedulers;
-import io.reactivex.Flowable;
-import io.reactivex.disposables.Disposable;
-import io.reactivex.schedulers.Schedulers;
+import hu.akarnokd.rxjava3.swing.SwingSchedulers;
+import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.disposables.Disposable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
 
 import jadx.gui.utils.NLS;
 import jadx.gui.utils.UiUtils;
@@ -35,6 +35,7 @@ public class HeapUsageBar extends JProgressBar {
 
 	private final double maxGB;
 	private final long limit;
+	private long peakUsed;
 	private final String labelTemplate;
 
 	private transient Disposable timer;
@@ -45,6 +46,7 @@ public class HeapUsageBar extends JProgressBar {
 		setStringPainted(true);
 
 		long maxMemory = runtime.maxMemory();
+		peakUsed = 0;
 		maxGB = maxMemory / GB;
 		limit = maxMemory - UiUtils.MIN_FREE_MEMORY;
 		labelTemplate = NLS.str("heapUsage.text");
@@ -102,8 +104,11 @@ public class HeapUsageBar extends JProgressBar {
 		}
 		UpdateData updateData = new UpdateData();
 		long used = runtime.totalMemory() - runtime.freeMemory();
+		if (used > peakUsed) {
+			peakUsed = used;
+		}
 		updateData.value = (int) (used / 1024);
-		updateData.label = String.format(labelTemplate, used / GB, maxGB);
+		updateData.label = String.format(labelTemplate, used / GB, maxGB, peakUsed / GB);
 		updateData.color = used > limit ? RED : GREEN;
 		return updateData;
 	}

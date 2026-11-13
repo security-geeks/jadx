@@ -21,15 +21,25 @@ build/
 classes/
 idea/
 .gradle/
+.kotlin/
 node_modules/
+.vscode/
 
 jadx-output/
 *-tmp/
 **/tmp/
 *.jobf
+*.jadx
 
 *.class
+*.jar
 *.dump
 *.log
 *.cfg
 *.orig
+*.json
+*.dot
+
+.env
+
+cliff.toml

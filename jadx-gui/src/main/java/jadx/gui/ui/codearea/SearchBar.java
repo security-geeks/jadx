@@ -1,11 +1,16 @@
 package jadx.gui.ui.codearea;
 
-import java.awt.*;
+import java.awt.Color;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 
-import javax.swing.*;
+import javax.swing.JButton;
+import javax.swing.JLabel;
+import javax.swing.JTextField;
+import javax.swing.JToggleButton;
+import javax.swing.JToolBar;
+import javax.swing.border.EmptyBorder;
 import javax.swing.text.BadLocationException;
 
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
@@ -15,32 +20,28 @@ import org.fife.ui.rtextarea.SearchResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.formdev.flatlaf.FlatClientProperties;
+
 import jadx.core.utils.StringUtils;
+import jadx.gui.utils.Icons;
 import jadx.gui.utils.NLS;
 import jadx.gui.utils.TextStandardActions;
-import jadx.gui.utils.UiUtils;
 
-class SearchBar extends JToolBar {
+public class SearchBar extends JToolBar {
 	private static final long serialVersionUID = 1836871286618633003L;
 
 	private static final Logger LOG = LoggerFactory.getLogger(SearchBar.class);
+	private static final int MAX_RESULT_COUNT = 999;
 
-	private static final Color COLOR_BG_ERROR = new Color(0xFFDFDE);
-	private static final Color COLOR_BG_WARN = new Color(0xFFFDD9);
-	private static final Color COLOR_BG_NORMAL = new Color(0xFFFFFF);
-
-	private static final Icon ICON_UP = UiUtils.openIcon("arrow_up");
-	private static final Icon ICON_DOWN = UiUtils.openIcon("arrow_down");
-	private static final Icon ICON_CLOSE = UiUtils.openIcon("cross");
-
-	private RSyntaxTextArea rTextArea;
+	private final RSyntaxTextArea rTextArea;
 
 	private final JTextField searchField;
-	private final JCheckBox markAllCB;
-	private final JCheckBox regexCB;
-
-	private final JCheckBox wholeWordCB;
-	private final JCheckBox matchCaseCB;
+	private final JLabel resultCountLabel;
+	private final JToggleButton markAllCB;
+	private final JToggleButton regexCB;
+	private final JToggleButton wholeWordCB;
+	private final JToggleButton matchCaseCB;
+	private boolean notFound;
 
 	public SearchBar(RSyntaxTextArea textArea) {
 		rTextArea = textArea;
@@ -49,6 +50,7 @@ class SearchBar extends JToolBar {
 		add(findLabel);
 
 		searchField = new JTextField(30);
+		searchField.putClientProperty(FlatClientProperties.TEXT_FIELD_SHOW_CLEAR_BUTTON, true);
 		searchField.addKeyListener(new KeyAdapter() {
 			@Override
 			public void keyReleased(KeyEvent e) {
@@ -66,41 +68,61 @@ class SearchBar extends JToolBar {
 			}
 		});
 		searchField.addActionListener(e -> search(1));
-		new TextStandardActions(searchField);
+		TextStandardActions.attach(searchField);
 		add(searchField);
 
-		JButton prevButton = new JButton(NLS.str("search.previous"));
-		prevButton.setIcon(ICON_UP);
+		ActionListener forwardListener = e -> search(1);
+
+		resultCountLabel = new JLabel();
+		resultCountLabel.setBorder(new EmptyBorder(0, 10, 0, 10));
+		resultCountLabel.setForeground(Color.GRAY);
+		add(resultCountLabel);
+		setResultCount(0);
+
+		matchCaseCB = new JToggleButton();
+		matchCaseCB.setIcon(Icons.ICON_MATCH);
+		matchCaseCB.setSelectedIcon(Icons.ICON_MATCH_SELECTED);
+		matchCaseCB.setToolTipText(NLS.str("search.match_case"));
+		matchCaseCB.addActionListener(forwardListener);
+		add(matchCaseCB);
+
+		wholeWordCB = new JToggleButton();
+		wholeWordCB.setIcon(Icons.ICON_WORDS);
+		wholeWordCB.setSelectedIcon(Icons.ICON_WORDS_SELECTED);
+		wholeWordCB.setToolTipText(NLS.str("search.whole_word"));
+		wholeWordCB.addActionListener(forwardListener);
+		add(wholeWordCB);
+
+		regexCB = new JToggleButton();
+		regexCB.setIcon(Icons.ICON_REGEX);
+		regexCB.setSelectedIcon(Icons.ICON_REGEX_SELECTED);
+		regexCB.setToolTipText(NLS.str("search.regex"));
+		regexCB.addActionListener(forwardListener);
+		add(regexCB);
+
+		JButton prevButton = new JButton();
+		prevButton.setIcon(Icons.ICON_UP);
+		prevButton.setToolTipText(NLS.str("search.previous"));
 		prevButton.addActionListener(e -> search(-1));
 		prevButton.setBorderPainted(false);
 		add(prevButton);
 
-		JButton nextButton = new JButton(NLS.str("search.next"));
-		nextButton.setIcon(ICON_DOWN);
+		JButton nextButton = new JButton();
+		nextButton.setIcon(Icons.ICON_DOWN);
+		nextButton.setToolTipText(NLS.str("search.next"));
 		nextButton.addActionListener(e -> search(1));
 		nextButton.setBorderPainted(false);
 		add(nextButton);
 
-		ActionListener forwardListener = e -> search(0);
-
-		markAllCB = new JCheckBox(NLS.str("search.mark_all"));
+		markAllCB = new JToggleButton();
+		markAllCB.setIcon(Icons.ICON_MARK);
+		markAllCB.setSelectedIcon(Icons.ICON_MARK_SELECTED);
+		markAllCB.setToolTipText(NLS.str("search.mark_all"));
 		markAllCB.addActionListener(forwardListener);
 		add(markAllCB);
 
-		regexCB = new JCheckBox(NLS.str("search.regex"));
-		regexCB.addActionListener(forwardListener);
-		add(regexCB);
-
-		matchCaseCB = new JCheckBox(NLS.str("search.match_case"));
-		matchCaseCB.addActionListener(forwardListener);
-		add(matchCaseCB);
-
-		wholeWordCB = new JCheckBox(NLS.str("search.whole_word"));
-		wholeWordCB.addActionListener(forwardListener);
-		add(wholeWordCB);
-
 		JButton closeButton = new JButton();
-		closeButton.setIcon(ICON_CLOSE);
+		closeButton.setIcon(Icons.ICON_CLOSE);
 		closeButton.addActionListener(e -> toggle());
 		closeButton.setBorderPainted(false);
 		add(closeButton);
@@ -109,7 +131,25 @@ class SearchBar extends JToolBar {
 		setVisible(false);
 	}
 
-	public boolean toggle() {
+	/*
+	 * Replicates IntelliJ's search bar behavior
+	 * 1.1. If the user has selected text, use that as the search text
+	 * 1.2. Otherwise, use the previous search text (or empty if none)
+	 * 2. Select all text in the search bar and give it focus
+	 */
+	public void showAndFocus() {
+		setVisible(true);
+
+		String selectedText = rTextArea.getSelectedText();
+		if (!StringUtils.isEmpty(selectedText)) {
+			searchField.setText(selectedText);
+		}
+
+		searchField.selectAll();
+		searchField.requestFocus();
+	}
+
+	public void toggle() {
 		boolean visible = !isVisible();
 		setVisible(visible);
 
@@ -118,19 +158,19 @@ class SearchBar extends JToolBar {
 			if (!StringUtils.isEmpty(preferText)) {
 				searchField.setText(preferText);
 			}
-			searchField.requestFocus();
 			searchField.selectAll();
+			searchField.requestFocus();
 		} else {
 			rTextArea.requestFocus();
 		}
-		return visible;
 	}
 
 	private void search(int direction) {
 		String searchText = searchField.getText();
 		if (searchText == null
-				|| searchText.length() == 0
+				|| searchText.isEmpty()
 				|| rTextArea.getText() == null) {
+			setResultCount(0);
 			return;
 		}
 
@@ -145,10 +185,14 @@ class SearchBar extends JToolBar {
 		context.setRegularExpression(regex);
 		context.setSearchForward(forward);
 		context.setWholeWord(wholeWord);
-		context.setMarkAll(markAllCB.isSelected());
+		context.setSearchWrap(true);
+
+		// We enable Mark All even if the corresponding toggle button is off,
+		// this is a bit hackish, but it's the only way to count matches through SearchEngine
+		context.setMarkAll(true);
 
 		// TODO hack: move cursor before previous search for not jump to next occurrence
-		if (direction == 0 && !COLOR_BG_ERROR.equals(searchField.getBackground())) {
+		if (direction == 0 && !notFound) {
 			try {
 				int caretPos = rTextArea.getCaretPosition();
 				int lineNum = rTextArea.getLineOfOffset(caretPos) - 1;
@@ -161,24 +205,29 @@ class SearchBar extends JToolBar {
 		}
 
 		SearchResult result = SearchEngine.find(rTextArea, context);
-		if (!result.wasFound()) {
-			int pos = SearchEngine.getNextMatchPos(searchText, rTextArea.getText(), forward, matchCase, wholeWord);
-			if (pos != -1) {
-				rTextArea.setCaretPosition(forward ? 0 : rTextArea.getDocument().getLength() - 1);
-				search(direction);
-				searchField.setBackground(COLOR_BG_WARN);
-				return;
-			}
-			searchField.setBackground(COLOR_BG_ERROR);
-		} else {
-			searchField.setBackground(COLOR_BG_NORMAL);
+
+		setResultCount(result.getMarkedCount());
+
+		// Clear the highlighted results if Mark All is disabled
+		if (!markAllCB.isSelected()) {
+			context.setMarkAll(false);
+			SearchEngine.markAll(rTextArea, context);
 		}
+
+		notFound = !result.wasFound();
+		if (notFound) {
+			searchField.putClientProperty("JComponent.outline", "error");
+		} else {
+			searchField.putClientProperty("JComponent.outline", "");
+		}
+		searchField.repaint();
 	}
 
-	public void setRTextArea(RSyntaxTextArea rTextArea) {
-		this.rTextArea = rTextArea;
-		if (isVisible()) {
-			this.search(0);
-		}
+	private void setResultCount(int count) {
+		boolean exceedsLimit = count > MAX_RESULT_COUNT;
+		String plusSign = exceedsLimit ? "+" : "";
+		count = exceedsLimit ? MAX_RESULT_COUNT : count;
+
+		resultCountLabel.setText(NLS.str("search.results", plusSign, count));
 	}
 }

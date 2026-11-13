@@ -1,63 +1,160 @@
 package jadx.gui.ui.codearea;
 
+import java.awt.Component;
 import java.awt.Dimension;
+import java.awt.Insets;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.event.ActionEvent;
 import java.awt.event.FocusEvent;
 import java.awt.event.FocusListener;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseListener;
+import java.awt.event.MouseMotionListener;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.swing.AbstractAction;
+import javax.swing.Action;
 import javax.swing.JCheckBoxMenuItem;
+import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
 import javax.swing.JViewport;
 import javax.swing.SwingUtilities;
 import javax.swing.event.CaretEvent;
 import javax.swing.event.CaretListener;
 import javax.swing.event.PopupMenuEvent;
+import javax.swing.event.PopupMenuListener;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.Caret;
 import javax.swing.text.DefaultCaret;
 
+import org.fife.ui.rsyntaxtextarea.AbstractTokenMakerFactory;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
+import org.fife.ui.rsyntaxtextarea.RSyntaxUtilities;
+import org.fife.ui.rsyntaxtextarea.Token;
+import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
+import org.fife.ui.rsyntaxtextarea.TokenTypes;
+import org.fife.ui.rtextarea.Gutter;
 import org.fife.ui.rtextarea.SearchContext;
 import org.fife.ui.rtextarea.SearchEngine;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.api.ICodeInfo;
 import jadx.core.utils.StringUtils;
+import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.gui.jobs.IBackgroundTask;
 import jadx.gui.settings.JadxSettings;
 import jadx.gui.treemodel.JClass;
+import jadx.gui.treemodel.JEditableNode;
 import jadx.gui.treemodel.JNode;
-import jadx.gui.ui.ContentPanel;
 import jadx.gui.ui.MainWindow;
+import jadx.gui.ui.action.JNodeAction;
+import jadx.gui.ui.panel.ContentPanel;
 import jadx.gui.utils.DefaultPopupMenuListener;
 import jadx.gui.utils.JumpPosition;
 import jadx.gui.utils.NLS;
+import jadx.gui.utils.UiUtils;
+import jadx.gui.utils.ui.DocumentUpdateListener;
+import jadx.gui.utils.ui.ZoomActions;
 
 public abstract class AbstractCodeArea extends RSyntaxTextArea {
 	private static final long serialVersionUID = -3980354865216031972L;
 
 	private static final Logger LOG = LoggerFactory.getLogger(AbstractCodeArea.class);
 
-	protected final ContentPanel contentPanel;
-	protected final JNode node;
+	public static final String SYNTAX_STYLE_SMALI = "text/smali";
 
-	public AbstractCodeArea(ContentPanel contentPanel) {
+	static {
+		TokenMakerFactory tokenMakerFactory = TokenMakerFactory.getDefaultInstance();
+		if (tokenMakerFactory instanceof AbstractTokenMakerFactory) {
+			AbstractTokenMakerFactory atmf = (AbstractTokenMakerFactory) tokenMakerFactory;
+			atmf.putMapping(SYNTAX_STYLE_SMALI, "jadx.gui.ui.codearea.SmaliTokenMaker");
+			// use simple token maker instead default PlainTextTokenMaker to avoid parse errors
+			atmf.putMapping(SYNTAX_STYLE_NONE, "jadx.gui.ui.codearea.SimpleTokenMaker");
+		} else {
+			throw new JadxRuntimeException("Unexpected TokenMakerFactory instance: " + tokenMakerFactory.getClass());
+		}
+
+		SmaliFoldParser.register();
+	}
+
+	protected ContentPanel contentPanel;
+	protected JNode node;
+
+	private final AtomicBoolean loaded = new AtomicBoolean(false);
+
+	public AbstractCodeArea(ContentPanel contentPanel, JNode node) {
 		this.contentPanel = contentPanel;
-		this.node = contentPanel.getNode();
+		this.node = Objects.requireNonNull(node);
 
 		setMarkOccurrences(false);
-		setEditable(false);
-		setCodeFoldingEnabled(false);
+		setFadeCurrentLineHighlight(true);
+		setAntiAliasingEnabled(true);
+		applyEditableProperties(node);
 		loadSettings();
-		JadxSettings settings = contentPanel.getTabbedPane().getMainWindow().getSettings();
+
+		JadxSettings settings = contentPanel.getMainWindow().getSettings();
 		setLineWrap(settings.isCodeAreaLineWrap());
 
-		JPopupMenu popupMenu = getPopupMenu();
+		ZoomActions.register(this, settings, this::loadSettings);
+
+		if (node instanceof JEditableNode) {
+			JEditableNode editableNode = (JEditableNode) node;
+			addSaveActions(editableNode);
+			addChangeUpdates(editableNode);
+		} else {
+			addCaretActions();
+			addFastCopyAction();
+		}
+	}
+
+	private void applyEditableProperties(JNode node) {
+		boolean editable = node.isEditable();
+		setEditable(editable);
+		if (editable) {
+			setCloseCurlyBraces(true);
+			setCloseMarkupTags(true);
+			setAutoIndentEnabled(true);
+			setClearWhitespaceLinesEnabled(true);
+		}
+	}
+
+	@Override
+	protected JPopupMenu createPopupMenu() {
+		JPopupMenu menu = new JPopupMenu();
+		if (node.isEditable()) {
+			menu.add(createPopupMenuItem(getAction(UNDO_ACTION)));
+			menu.add(createPopupMenuItem(getAction(REDO_ACTION)));
+			menu.addSeparator();
+			menu.add(createPopupMenuItem(cutAction));
+			menu.add(createPopupMenuItem(copyAction));
+			menu.add(createPopupMenuItem(getAction(PASTE_ACTION)));
+			menu.add(createPopupMenuItem(getAction(DELETE_ACTION)));
+			menu.addSeparator();
+			menu.add(createPopupMenuItem(getAction(SELECT_ALL_ACTION)));
+		} else {
+			menu.add(createPopupMenuItem(copyAction));
+			menu.add(createPopupMenuItem(getAction(SELECT_ALL_ACTION)));
+		}
+		appendFoldingMenu(menu);
+		appendWrapLineMenu(menu);
+		return menu;
+	}
+
+	@Override
+	protected void appendFoldingMenu(JPopupMenu popup) {
+		// append code folding popup menu entry only if enabled
+		if (isCodeFoldingEnabled()) {
+			super.appendFoldingMenu(popup);
+		}
+	}
+
+	private void appendWrapLineMenu(JPopupMenu popupMenu) {
+		JadxSettings settings = contentPanel.getMainWindow().getSettings();
 		popupMenu.addSeparator();
 		JCheckBoxMenuItem wrapItem = new JCheckBoxMenuItem(NLS.str("popup.line_wrap"), getLineWrap());
 		wrapItem.setAction(new AbstractAction(NLS.str("popup.line_wrap")) {
@@ -65,17 +162,19 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 			public void actionPerformed(ActionEvent e) {
 				boolean wrap = !getLineWrap();
 				settings.setCodeAreaLineWrap(wrap);
-				contentPanel.getTabbedPane().getOpenTabs().values().forEach(v -> {
+				settings.sync();
+				contentPanel.getTabbedPane().getTabs().forEach(v -> {
 					if (v instanceof AbstractCodeContentPanel) {
 						AbstractCodeArea codeArea = ((AbstractCodeContentPanel) v).getCodeArea();
-						setCodeAreaLineWrap(codeArea, wrap);
-						if (v instanceof ClassCodeContentPanel) {
-							codeArea = ((ClassCodeContentPanel) v).getSmaliCodeArea();
+						if (codeArea != null) {
 							setCodeAreaLineWrap(codeArea, wrap);
+							if (v instanceof ClassCodeContentPanel) {
+								codeArea = ((ClassCodeContentPanel) v).getSmaliCodeArea();
+								setCodeAreaLineWrap(codeArea, wrap);
+							}
 						}
 					}
 				});
-				settings.sync();
 			}
 		});
 		popupMenu.add(wrapItem);
@@ -85,7 +184,16 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 				wrapItem.setState(getLineWrap());
 			}
 		});
+	}
 
+	private void setCodeAreaLineWrap(AbstractCodeArea codeArea, boolean wrap) {
+		codeArea.setLineWrap(wrap);
+		if (codeArea.isVisible()) {
+			codeArea.repaint();
+		}
+	}
+
+	private void addCaretActions() {
 		Caret caret = getCaret();
 		if (caret instanceof DefaultCaret) {
 			((DefaultCaret) caret).setUpdatePolicy(DefaultCaret.ALWAYS_UPDATE);
@@ -120,11 +228,57 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 		});
 	}
 
-	private void setCodeAreaLineWrap(AbstractCodeArea codeArea, boolean wrap) {
-		codeArea.setLineWrap(wrap);
-		if (codeArea.isVisible()) {
-			codeArea.repaint();
+	/**
+	 * Ctrl+C will copy highlighted word
+	 */
+	private void addFastCopyAction() {
+		addKeyListener(new KeyAdapter() {
+			@Override
+			public void keyPressed(KeyEvent e) {
+				if (e.getKeyCode() == KeyEvent.VK_C && UiUtils.isCtrlDown(e)) {
+					UiUtils.copyToClipboard(getSelectedTokenOrWord());
+				}
+			}
+		});
+	}
+
+	/**
+	 * If the user has selected an individual word, for example by clicking and dragging
+	 * the mouse, then get that. Otherwise get the token underneath the cursor.
+	 * This is useful when the token is a string or comment and we want to control or copy
+	 * the word rather than the whole thing.
+	 *
+	 * @return The word or the token text
+	 */
+	public @Nullable String getSelectedTokenOrWord() {
+		final String rc = getSelectedText();
+		if (rc == null) {
+			return getWordUnderCaret();
 		}
+		if (StringUtils.isEmpty(rc)) {
+			return getWordUnderCaret();
+		}
+		return rc;
+	}
+
+	private void addSaveActions(JEditableNode node) {
+		addKeyListener(new KeyAdapter() {
+			@Override
+			public void keyPressed(KeyEvent e) {
+				if (e.getKeyCode() == KeyEvent.VK_S && UiUtils.isCtrlDown(e)) {
+					node.save(AbstractCodeArea.this.getText());
+					node.setChanged(false);
+				}
+			}
+		});
+	}
+
+	private void addChangeUpdates(JEditableNode editableNode) {
+		getDocument().addDocumentListener(new DocumentUpdateListener(ev -> {
+			if (loaded.get()) {
+				editableNode.setChanged(true);
+			}
+		}));
 	}
 
 	private String highlightCaretWord(String lastText, int pos) {
@@ -139,64 +293,109 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 		return lastText;
 	}
 
+	@Nullable
 	public String getWordUnderCaret() {
 		return getWordByPosition(getCaretPosition());
 	}
 
-	public int getWordStart(int pos) {
-		int start = Math.max(0, pos - 1);
-		try {
-			if (!StringUtils.isWordSeparator(getText(start, 1).charAt(0))) {
-				do {
-					start--;
-				} while (start >= 0 && !StringUtils.isWordSeparator(getText(start, 1).charAt(0)));
-			}
-			start++;
-		} catch (BadLocationException e) {
-			e.printStackTrace();
-			start = -1;
+	public @Nullable String getWordByPosition(int offset) {
+		Token token = getWordTokenAtOffset(offset);
+		if (token == null) {
+			return null;
 		}
-		return start;
+		String str = token.getLexeme();
+		int len = str.length();
+		if (len > 2 && str.startsWith("\"") && str.endsWith("\"")) {
+			return str.substring(1, len - 1);
+		}
+		return str;
 	}
 
-	public int getWordEnd(int pos, int max) {
-		int end = pos;
+	/**
+	 * Return any word token (not whitespace or special symbol) at offset.
+	 * Select the previous token if the cursor at word end (current token already is whitespace)
+	 */
+	public @Nullable Token getWordTokenAtOffset(int offset) {
 		try {
-			if (!StringUtils.isWordSeparator(getText(end, 1).charAt(0))) {
-				do {
-					end++;
-				} while (end < max && !StringUtils.isWordSeparator(getText(end, 1).charAt(0)));
+			int line = this.getLineOfOffset(offset);
+			Token lineTokens = this.getTokenListForLine(line);
+			Token token = null;
+			Token prevToken = null;
+			for (Token t = lineTokens; t != null && t.isPaintable(); t = t.getNextToken()) {
+				if (t.containsPosition(offset)) {
+					token = t;
+					break;
+				}
+				prevToken = t;
 			}
-		} catch (BadLocationException e) {
-			e.printStackTrace();
-			end = max;
+			if (token == null) {
+				return null;
+			}
+			if (isWordToken(token)) {
+				return token;
+			}
+			if (isWordToken(prevToken)) {
+				return prevToken;
+			}
+			return null;
+		} catch (Exception e) {
+			LOG.error("Failed to get token at pos: {}", offset, e);
+			return null;
 		}
-		return end;
 	}
 
-	public String getWordByPosition(int pos) {
-		String text;
-		int len = getDocument().getLength();
-		int start = getWordStart(pos);
-		int end = getWordEnd(pos, len);
-		try {
-			if (end > start) {
-				text = getText(start, end - start);
-			} else {
-				text = null;
-			}
-		} catch (BadLocationException e) {
-			e.printStackTrace();
-			System.out.printf("start: %d end: %d%n", start, end);
-			text = null;
+	public static boolean isWordToken(@Nullable Token token) {
+		if (token == null) {
+			return false;
 		}
-		return text;
+		switch (token.getType()) {
+			case TokenTypes.NULL:
+			case TokenTypes.WHITESPACE:
+			case TokenTypes.SEPARATOR:
+			case TokenTypes.OPERATOR:
+			case TokenTypes.FUNCTION:
+				return false;
+
+			case TokenTypes.IDENTIFIER:
+				if (token.length() == 1) {
+					char ch = token.charAt(0);
+					return ch != ';' && ch != '.' && ch != ',';
+				}
+				return true;
+
+			default:
+				return true;
+		}
+	}
+
+	public abstract ICodeInfo getCodeInfo();
+
+	public void load() {
+		if (isLoaded()) {
+			return;
+		}
+		IBackgroundTask loadTask = getLoadTask();
+		contentPanel.getMainWindow().getBackgroundExecutor().execute(loadTask);
 	}
 
 	/**
 	 * Implement in this method the code that loads and sets the content to be displayed
+	 * Call `setLoaded()` on load finish.
 	 */
-	public abstract void load();
+	public abstract IBackgroundTask getLoadTask();
+
+	public void setLoaded() {
+		this.loaded.set(true);
+		discardAllEdits(); // disable 'undo' action to empty state (before load)
+	}
+
+	public void setUnLoaded() {
+		this.loaded.set(false);
+	}
+
+	public boolean isLoaded() {
+		return loaded.get();
+	}
 
 	/**
 	 * Implement in this method the code that reloads node from cache and sets the new content to be
@@ -208,47 +407,32 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 		RSyntaxTextArea area = new RSyntaxTextArea();
 		area.setEditable(false);
 		area.setCodeFoldingEnabled(false);
+		area.setAntiAliasingEnabled(true);
 		loadCommonSettings(mainWindow, area);
 		return area;
 	}
 
 	public static void loadCommonSettings(MainWindow mainWindow, RSyntaxTextArea area) {
-		area.setAntiAliasingEnabled(true);
-		mainWindow.getEditorTheme().apply(area);
-
 		JadxSettings settings = mainWindow.getSettings();
-		area.setFont(settings.getFont());
+		mainWindow.getEditorThemeManager().apply(area);
+		area.setFont(settings.getCodeFont());
+		Gutter gutter = RSyntaxUtilities.getGutter(area);
+		if (gutter != null) {
+			gutter.setLineNumberFont(settings.getCodeFont());
+		}
 	}
 
 	public void loadSettings() {
-		loadCommonSettings(contentPanel.getTabbedPane().getMainWindow(), this);
+		loadCommonSettings(contentPanel.getMainWindow(), this);
 	}
 
 	public void scrollToPos(int pos) {
 		try {
 			setCaretPosition(pos);
+			centerCurrentLine();
+			forceCurrentLineHighlightRepaint();
 		} catch (Exception e) {
-			LOG.debug("Can't scroll to position {}", pos, e);
-		}
-		centerCurrentLine();
-		forceCurrentLineHighlightRepaint();
-	}
-
-	public void scrollToLine(int line) {
-		int lineNum = line - 1;
-		if (lineNum < 0) {
-			lineNum = 0;
-		}
-		setCaretAtLine(lineNum);
-		centerCurrentLine();
-		forceCurrentLineHighlightRepaint();
-	}
-
-	private void setCaretAtLine(int line) {
-		try {
-			setCaretPosition(getLineStartOffset(line));
-		} catch (BadLocationException e) {
-			LOG.debug("Can't scroll to {}", line, e);
+			LOG.warn("Can't scroll to position {}", pos, e);
 		}
 	}
 
@@ -279,36 +463,36 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 		}
 	}
 
-	private void registerWordHighlighter() {
-		addMouseListener(new MouseAdapter() {
-			@Override
-			public void mouseClicked(MouseEvent evt) {
-				if (evt.getClickCount() % 2 == 0 && !evt.isConsumed()) {
-					evt.consume();
-					String str = getSelectedText();
-					if (str != null) {
-						highlightAllMatches(str);
-					}
-				} else {
-					highlightAllMatches(null);
-				}
-			}
-		});
-	}
-
 	/**
 	 * @param str - if null -> reset current highlights
 	 */
 	private void highlightAllMatches(@Nullable String str) {
-		SearchContext context = new SearchContext(str);
-		context.setMarkAll(true);
-		context.setMatchCase(true);
-		context.setWholeWord(true);
-		SearchEngine.markAll(this, context);
+		try {
+			SearchContext context = new SearchContext(str);
+			context.setMarkAll(true);
+			context.setMatchCase(true);
+			context.setWholeWord(true);
+			SearchEngine.markAll(this, context);
+		} catch (Throwable e) {
+			// syntax parsing can fail for incorrect code
+			LOG.debug("Search highlight failed", e);
+		}
 	}
 
-	public JumpPosition getCurrentPosition() {
-		return new JumpPosition(node, getCaretLineNumber() + 1, getCaretPosition());
+	public @Nullable JumpPosition getCurrentPosition() {
+		int pos = getCaretPosition();
+		if (pos == 0) {
+			return null;
+		}
+		return new JumpPosition(node, pos);
+	}
+
+	public int getLineStartFor(int pos) throws BadLocationException {
+		return getLineStartOffset(getLineOfOffset(pos));
+	}
+
+	public String getLineAt(int pos) throws BadLocationException {
+		return getLineText(getLineOfOffset(pos) + 1);
 	}
 
 	public String getLineText(int line) throws BadLocationException {
@@ -316,11 +500,6 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 		int startOffset = getLineStartOffset(lineNum);
 		int endOffset = getLineEndOffset(lineNum);
 		return getText(startOffset, endOffset - startOffset);
-	}
-
-	@Nullable
-	Integer getSourceLine(int line) {
-		return node.getSourceLine(line);
 	}
 
 	public ContentPanel getContentPanel() {
@@ -337,5 +516,65 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 			return (JClass) node;
 		}
 		return null;
+	}
+
+	public boolean isDisposed() {
+		return node == null;
+	}
+
+	public void dispose() {
+		// clear internals
+		try {
+			setIgnoreRepaint(true);
+			setText("");
+			setEnabled(false);
+			setSyntaxEditingStyle(SYNTAX_STYLE_NONE);
+			setLinkGenerator(null);
+			for (MouseListener mouseListener : getMouseListeners()) {
+				removeMouseListener(mouseListener);
+			}
+			for (MouseMotionListener mouseMotionListener : getMouseMotionListeners()) {
+				removeMouseMotionListener(mouseMotionListener);
+			}
+			JPopupMenu popupMenu = getPopupMenu();
+			for (PopupMenuListener popupMenuListener : popupMenu.getPopupMenuListeners()) {
+				popupMenu.removePopupMenuListener(popupMenuListener);
+			}
+			for (Component component : popupMenu.getComponents()) {
+				if (component instanceof JMenuItem) {
+					Action action = ((JMenuItem) component).getAction();
+					if (action instanceof JNodeAction) {
+						((JNodeAction) action).dispose();
+					}
+				}
+			}
+			popupMenu.removeAll();
+		} catch (Throwable e) {
+			LOG.debug("Error on code area dispose", e);
+		}
+		// code area reference can still be used somewhere in UI objects,
+		// reset node reference to allow to GC jadx objects tree
+		node = null;
+		contentPanel = null;
+	}
+
+	@Override
+	public Dimension getPreferredSize() {
+		try {
+			return super.getPreferredSize();
+		} catch (Exception e) {
+			LOG.warn("Failed to calculate preferred size for code area", e);
+			// copied from javax.swing.JTextArea.getPreferredSize (super call above)
+			// as a fallback for returned null size
+			Dimension d = new Dimension(400, 400);
+			Insets insets = getInsets();
+			if (getColumns() != 0) {
+				d.width = Math.max(d.width, getColumns() * getColumnWidth() + insets.left + insets.right);
+			}
+			if (getRows() != 0) {
+				d.height = Math.max(d.height, getRows() * getRowHeight() + insets.top + insets.bottom);
+			}
+			return d;
+		}
 	}
 }

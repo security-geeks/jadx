@@ -1,9 +1,8 @@
 package jadx.core.dex.instructions.args;
 
-import java.util.Objects;
-
 import org.jetbrains.annotations.NotNull;
 
+import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.nodes.InsnNode;
@@ -26,6 +25,12 @@ public final class InsnWrapArg extends InsnArg {
 		return wrappedInsn;
 	}
 
+	public InsnNode unWrapWithCopy() {
+		InsnNode copy = wrappedInsn.copyWithoutResult();
+		copy.remove(AFlag.WRAPPED);
+		return copy;
+	}
+
 	@Override
 	public void setParentInsn(InsnNode parentInsn) {
 		if (parentInsn == wrappedInsn) {
@@ -36,7 +41,14 @@ public final class InsnWrapArg extends InsnArg {
 
 	@Override
 	public InsnArg duplicate() {
-		InsnWrapArg copy = new InsnWrapArg(wrappedInsn.copyWithoutResult());
+		InsnNode wrapInsn = wrappedInsn;
+		InsnNode wrapInsnCopy = wrapInsn.copyWithoutResult();
+		if (wrapInsn.getResult() != null && wrapInsn.contains(AFlag.FORCE_ASSIGN_INLINE)) {
+			// keep same SSA var in result arg, this will break previous version, mark it for removal
+			wrapInsnCopy.setResult(wrapInsn.getResult().duplicate());
+			wrapInsn.add(AFlag.DONT_GENERATE);
+		}
+		InsnWrapArg copy = new InsnWrapArg(wrapInsnCopy);
 		copy.setType(type);
 		return copyCommonParams(copy);
 	}
@@ -75,10 +87,18 @@ public final class InsnWrapArg extends InsnArg {
 	}
 
 	@Override
-	public String toString() {
-		if (wrappedInsn.getType() == InsnType.CONST_STR && Objects.equals(type, ArgType.STRING)) {
+	public String toShortString() {
+		if (wrappedInsn.getType() == InsnType.CONST_STR) {
 			return "(\"" + ((ConstStringNode) wrappedInsn).getString() + "\")";
 		}
-		return "(wrap: " + type + " : " + wrappedInsn + ')';
+		return "(wrap " + type + ":" + wrappedInsn.getType() + ')';
+	}
+
+	@Override
+	public String toString() {
+		if (wrappedInsn.getType() == InsnType.CONST_STR) {
+			return "(\"" + ((ConstStringNode) wrappedInsn).getString() + "\")";
+		}
+		return "(wrap " + type + ":" + wrappedInsn + ')';
 	}
 }

@@ -1,23 +1,32 @@
 package jadx.gui.device.debugger;
 
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Map.Entry;
 
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import jadx.api.JadxDecompiler;
 import jadx.api.JavaClass;
-import jadx.api.ResourceFile;
-import jadx.api.ResourceType;
+import jadx.core.deobf.NameMapper;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.nodes.ClassNode;
+import jadx.core.utils.android.AndroidManifestParser;
+import jadx.core.utils.android.AppAttribute;
+import jadx.core.utils.android.ApplicationParams;
 import jadx.gui.device.debugger.smali.Smali;
+import jadx.gui.device.debugger.smali.SmaliMethodNode;
 import jadx.gui.treemodel.JClass;
-import jadx.gui.treemodel.JNode;
 import jadx.gui.ui.MainWindow;
+import jadx.gui.utils.NLS;
+import jadx.gui.utils.UiUtils;
 
 public class DbgUtils {
+	private static final Logger LOG = LoggerFactory.getLogger(DbgUtils.class);
 
 	private static Map<ClassInfo, Smali> smaliCache = Collections.emptyMap();
 
@@ -45,10 +54,25 @@ public class DbgUtils {
 		return null;
 	}
 
+	@Nullable
+	public static SmaliMethodNode getSmaliMethodNode(JClass cls, String mthRawFullID) {
+		Smali smali = getSmali(cls.getCls().getClassNode().getTopParentClass());
+		if (smali != null) {
+			return smali.getMethodNode(mthRawFullID);
+		}
+		return null;
+	}
+
+	public static void printSmaliLineMapping(SmaliMethodNode smn) {
+		for (Map.Entry<Integer, Integer> lineToCodeOffset : smn.getLineMapping().entrySet()) {
+			LOG.debug("line={} -> codeOffset={}", lineToCodeOffset.getKey(), lineToCodeOffset.getValue());
+		}
+	}
+
 	public static String[] sepClassAndMthSig(String fullSig) {
-		int pos = fullSig.indexOf("(");
+		int pos = fullSig.indexOf('(');
 		if (pos != -1) {
-			pos = fullSig.lastIndexOf(".", pos);
+			pos = fullSig.lastIndexOf('.', pos);
 			if (pos != -1) {
 				String[] sigs = new String[2];
 				sigs[0] = fullSig.substring(0, pos);
@@ -90,10 +114,14 @@ public class DbgUtils {
 		clsSig = DbgUtils.classSigToFullName(clsSig);
 		JavaClass cls = mainWindow.getWrapper().getDecompiler().searchJavaClassOrItsParentByOrigFullName(clsSig);
 		if (cls != null) {
-			JClass jc = (JClass) mainWindow.getCacheObject().getNodeCache().makeFrom(cls);
+			JClass jc = mainWindow.getCacheObject().getNodeCache().makeFrom(cls);
 			return jc.getRootClass();
 		}
 		return null;
+	}
+
+	public static JClass getJClass(JavaClass cls, MainWindow mainWindow) {
+		return mainWindow.getCacheObject().getNodeCache().makeFrom(cls);
 	}
 
 	public static ClassNode getClassNodeBySig(String clsSig, MainWindow mainWindow) {
@@ -101,67 +129,72 @@ public class DbgUtils {
 		return mainWindow.getWrapper().getDecompiler().searchClassNodeByOrigFullName(clsSig);
 	}
 
-	public static String searchPackageName(MainWindow mainWindow) {
-		String content = getManifestContent(mainWindow);
-		int pos = content.indexOf("<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ");
-		if (pos > -1) {
-			pos = content.lastIndexOf(">", pos);
-			if (pos > -1) {
-				pos = content.indexOf(" package=\"", pos);
-				if (pos > -1) {
-					pos += " package=\"".length();
-					return content.substring(pos, content.indexOf("\"", pos));
-				}
-			}
-		}
-		return "";
-	}
-
-	/**
-	 * @return the Activity class for android.intent.action.MAIN.
-	 */
-	@Nullable
-	public static JClass searchMainActivity(MainWindow mainWindow) {
-		String content = getManifestContent(mainWindow);
-		int pos = content.indexOf("<action android:name=\"android.intent.action.MAIN\"");
-		if (pos > -1) {
-			pos = content.lastIndexOf("<activity ", pos);
-			if (pos > -1) {
-				pos = content.indexOf(" android:name=\"", pos);
-				if (pos > -1) {
-					pos += " android:name=\"".length();
-					String classFullName = content.substring(pos, content.indexOf("\"", pos));
-					// in case the MainActivity class has been renamed before, we need raw name.
-					JavaClass cls = mainWindow.getWrapper().getDecompiler().searchJavaClassByAliasFullName(classFullName);
-					JNode jNode = mainWindow.getCacheObject().getNodeCache().makeFrom(cls);
-					if (jNode != null) {
-						return jNode.getRootClass();
-					}
-				}
-			}
-		}
-		return null;
-	}
-
-	// TODO: parse AndroidManifest.xml instead of looking for keywords
-	private static String getManifestContent(MainWindow mainWindow) {
-		try {
-			ResourceFile androidManifest = mainWindow.getWrapper().getDecompiler().getResources()
-					.stream()
-					.filter(res -> res.getType() == ResourceType.MANIFEST)
-					.findFirst()
-					.orElse(null);
-
-			if (androidManifest != null) {
-				return androidManifest.loadContent().getText().getCodeStr();
-			}
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-		return "";
-	}
-
 	public static boolean isPrintableChar(int c) {
 		return 32 <= c && c <= 126;
+	}
+
+	public static final class AppData {
+		private final String appPackage;
+		private final @Nullable JavaClass mainActivityCls;
+
+		public AppData(String appPackage, @Nullable JavaClass mainActivityCls) {
+			this.appPackage = appPackage;
+			this.mainActivityCls = mainActivityCls;
+		}
+
+		public String getAppPackage() {
+			return appPackage;
+		}
+
+		/**
+		 * Can be null for apps without a launcher activity (e.g. system apps with only services or
+		 * providers)
+		 */
+		public @Nullable JavaClass getMainActivityCls() {
+			return mainActivityCls;
+		}
+
+		/**
+		 * Component name used to start the app with 'am start' or null if app has no launcher activity
+		 */
+		public @Nullable String getProcessName() {
+			if (mainActivityCls == null) {
+				return null;
+			}
+			return appPackage + '/' + mainActivityCls.getClassNode().getClassInfo().getFullName();
+		}
+	}
+
+	public static @Nullable AppData parseAppData(MainWindow mw) {
+		JadxDecompiler decompiler = mw.getWrapper().getDecompiler();
+		String appPkg = decompiler.getRoot().getAppPackage();
+		if (appPkg == null) {
+			UiUtils.errorMessage(mw, NLS.str("error_dialog.not_found", "App package"));
+			return null;
+		}
+		AndroidManifestParser parser = new AndroidManifestParser(
+				AndroidManifestParser.getAndroidManifest(decompiler.getResources()),
+				EnumSet.of(AppAttribute.MAIN_ACTIVITY),
+				decompiler.getArgs().getSecurity());
+		if (!parser.isManifestFound()) {
+			UiUtils.errorMessage(mw, NLS.str("error_dialog.not_found", "AndroidManifest.xml"));
+			return null;
+		}
+		ApplicationParams results = parser.parse();
+		String mainActivityName = results.getMainActivity();
+		if (mainActivityName == null) {
+			// still possible to attach to already running process
+			return new AppData(appPkg, null);
+		}
+		if (!NameMapper.isValidFullIdentifier(mainActivityName)) {
+			UiUtils.errorMessage(mw, "Invalid main activity name");
+			return null;
+		}
+		JavaClass mainActivityClass = results.getMainActivityJavaClass(decompiler);
+		if (mainActivityClass == null) {
+			UiUtils.errorMessage(mw, NLS.str("error_dialog.not_found", "Main activity class"));
+			return null;
+		}
+		return new AppData(appPkg, mainActivityClass);
 	}
 }

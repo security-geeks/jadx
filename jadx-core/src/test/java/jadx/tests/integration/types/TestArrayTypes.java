@@ -2,14 +2,13 @@ package jadx.tests.integration.types;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.IntegrationTest;
 
-import static jadx.tests.api.utils.JadxMatchers.containsOne;
-import static org.hamcrest.MatcherAssert.assertThat;
+import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestArrayTypes extends IntegrationTest {
 
+	@SuppressWarnings({ "ThrowablePrintedToSystemOut", "unused" })
 	public static class TestCls {
 
 		public void test() {
@@ -28,18 +27,16 @@ public class TestArrayTypes extends IntegrationTest {
 
 	@Test
 	public void test() {
-		ClassNode cls = getClassNode(TestCls.class);
-		String code = cls.getCode().toString();
-
-		assertThat(code, containsOne("use(new Object[]{e});"));
+		assertThat(getClassNode(TestCls.class))
+				.code()
+				.containsOne("use(new Object[]{e});");
 	}
 
 	@Test
 	public void testNoDebug() {
 		noDebugInfo();
-		ClassNode cls = getClassNode(TestCls.class);
-		String code = cls.getCode().toString();
-
-		assertThat(code, containsOne("use(new Object[]{exc});"));
+		assertThat(getClassNode(TestCls.class))
+				.code()
+				.containsOne("use(new Object[]{exc});");
 	}
 }

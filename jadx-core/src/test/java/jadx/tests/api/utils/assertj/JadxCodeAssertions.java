@@ -1,11 +1,23 @@
 package jadx.tests.api.utils.assertj;
 
-import org.assertj.core.api.AbstractStringAssert;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Function;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
-import jadx.api.ICodeWriter;
+import org.assertj.core.api.AbstractStringAssert;
+import org.assertj.core.internal.Failures;
+
 import jadx.tests.api.utils.TestUtils;
 
+import static org.assertj.core.error.ShouldNotContainSubsequence.shouldNotContainSubsequence;
+
 public class JadxCodeAssertions extends AbstractStringAssert<JadxCodeAssertions> {
+
+	private Failures failures = Failures.instance();
+
 	public JadxCodeAssertions(String code) {
 		super(code, JadxCodeAssertions.class);
 	}
@@ -46,30 +58,85 @@ public class JadxCodeAssertions extends AbstractStringAssert<JadxCodeAssertions>
 		}
 		String indent = TestUtils.indent(commonIndent);
 		StringBuilder sb = new StringBuilder();
-		boolean first = true;
 		for (String line : lines) {
-			if (!line.isEmpty()) {
-				if (first) {
-					first = false;
-				} else {
-					sb.append(ICodeWriter.NL);
-				}
-				sb.append(indent);
-				sb.append(line);
+			sb.append('\n');
+			if (line.isEmpty()) {
+				// don't add common indent to empty lines
+				continue;
 			}
+			String searchLine = indent + line;
+			sb.append(searchLine);
+			// check every line for easier debugging
+			contains(searchLine);
 		}
-		return containsOnlyOnce(sb.toString());
+		return containsOnlyOnce(sb.substring(1));
+	}
+
+	public JadxCodeAssertions doesNotContainSubsequence(CharSequence... values) {
+		final var regex = Arrays.stream(values)
+				.map(value -> Pattern.quote(value.toString()))
+				.collect(Collectors.joining(".*"));
+
+		final var pattern = Pattern.compile(regex, Pattern.DOTALL);
+
+		final var matcher = pattern.matcher(actual);
+		if (matcher.find()) {
+			throw failures.failure(info, shouldNotContainSubsequence(actual, values, matcher.start()));
+		}
+
+		return this;
 	}
 
 	public JadxCodeAssertions removeBlockComments() {
 		String code = actual.replaceAll("/\\*.*\\*/", "");
-		return new JadxCodeAssertions(code);
+		JadxCodeAssertions newCode = new JadxCodeAssertions(code);
+		newCode.print();
+		return newCode;
+	}
+
+	public JadxCodeAssertions removeLineComments() {
+		String code = actual.replaceAll("//.*(?!$)", "");
+		JadxCodeAssertions newCode = new JadxCodeAssertions(code);
+		newCode.print();
+		return newCode;
 	}
 
 	public JadxCodeAssertions print() {
 		System.out.println("-----------------------------------------------------------");
 		System.out.println(actual);
 		System.out.println("-----------------------------------------------------------");
+		return this;
+	}
+
+	public JadxCodeAssertions containsOneOf(String... substringArr) {
+		int matches = 0;
+		for (String substring : substringArr) {
+			matches += TestUtils.count(actual, substring);
+		}
+		if (matches != 1) {
+			failWithMessage("Expected only one match from <%s> but was <%d>", Arrays.toString(substringArr), matches);
+		}
+		return this;
+	}
+
+	@SuppressWarnings("UnusedReturnValue")
+	@SafeVarargs
+	public final JadxCodeAssertions oneOf(Function<JadxCodeAssertions, JadxCodeAssertions>... checks) {
+		int passed = 0;
+		List<Throwable> failed = new ArrayList<>();
+		for (Function<JadxCodeAssertions, JadxCodeAssertions> check : checks) {
+			try {
+				check.apply(this);
+				passed++;
+			} catch (Throwable e) {
+				failed.add(e);
+			}
+		}
+		if (passed != 1) {
+			failWithMessage("Expected only one match but passed: <%d>, failed: <%d>, details:\n<%s>",
+					passed, failed.size(),
+					failed.stream().map(Throwable::getMessage).collect(Collectors.joining("\nFailed check:\n ")));
+		}
 		return this;
 	}
 }

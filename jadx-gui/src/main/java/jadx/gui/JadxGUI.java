@@ -1,63 +1,83 @@
 package jadx.gui;
 
+import java.awt.Desktop;
+
 import javax.swing.SwingUtilities;
-import javax.swing.UIManager;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import jadx.cli.LogHelper;
+import jadx.cli.JadxCLIArgs;
+import jadx.cli.config.JadxConfigAdapter;
+import jadx.commons.app.JadxSystemInfo;
+import jadx.core.Jadx;
+import jadx.core.utils.JadxBuildInfo;
+import jadx.core.utils.files.FileUtils;
+import jadx.gui.logs.LogCollector;
+import jadx.gui.settings.GuiConfigLocale;
 import jadx.gui.settings.JadxSettings;
-import jadx.gui.settings.JadxSettingsAdapter;
+import jadx.gui.settings.JadxSettingsData;
 import jadx.gui.ui.MainWindow;
-import jadx.gui.utils.NLS;
-import jadx.gui.utils.SystemInfo;
-import jadx.gui.utils.logs.LogCollector;
+import jadx.gui.utils.LafManager;
 
 public class JadxGUI {
 	private static final Logger LOG = LoggerFactory.getLogger(JadxGUI.class);
 
 	public static void main(String[] args) {
 		try {
-			LogCollector.register();
-			final JadxSettings settings = JadxSettingsAdapter.load();
-			settings.setLogLevel(LogHelper.LogLevelEnum.INFO);
-			// overwrite loaded settings by command line arguments
-			if (!settings.overrideProvided(args)) {
+			GuiConfigLocale.load();
+			JadxConfigAdapter<JadxSettingsData> configAdapter = JadxSettings.buildConfigAdapter();
+			JadxSettingsData settingsData = JadxCLIArgs.processArgs(args, new JadxSettingsData(), configAdapter);
+			if (settingsData == null) {
 				return;
 			}
-			if (!tryDefaultLookAndFeel()) {
-				UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-			}
-			NLS.setLocale(settings.getLangLocale());
-			printSystemInfo();
+			JadxSettings settings = new JadxSettings(configAdapter);
+			settings.loadSettingsData(settingsData);
+			GuiConfigLocale.checkConfig(settingsData);
 
-			SwingUtilities.invokeLater(new MainWindow(settings)::init);
+			LogCollector.register();
+			printSystemInfo();
+			setupDesktopEnvironment();
+			SwingUtilities.invokeLater(() -> {
+				LafManager.init(settings);
+				settings.getFontSettings().updateDefaultFont();
+				MainWindow mw = new MainWindow(settings);
+				registerOpenFileHandler(mw);
+				mw.init();
+			});
 		} catch (Exception e) {
 			LOG.error("Error: {}", e.getMessage(), e);
 			System.exit(1);
 		}
 	}
 
-	private static boolean tryDefaultLookAndFeel() {
-		String defLaf = System.getProperty("swing.defaultlaf");
-		if (defLaf != null) {
-			try {
-				UIManager.setLookAndFeel(defLaf);
-				return true;
-			} catch (Exception e) {
-				LOG.error("Failed to set default laf: {}", defLaf, e);
-			}
+	private static void setupDesktopEnvironment() {
+		if (JadxSystemInfo.IS_MAC) {
+			System.setProperty("apple.laf.useScreenMenuBar", "true");
+			System.setProperty("apple.awt.application.name", "jadx-gui");
+			System.setProperty("apple.awt.application.appearance", "system");
 		}
-		return false;
+	}
+
+	private static void registerOpenFileHandler(MainWindow mw) {
+		try {
+			if (Desktop.isDesktopSupported()) {
+				Desktop desktop = Desktop.getDesktop();
+				if (desktop.isSupported(Desktop.Action.APP_OPEN_FILE)) {
+					desktop.setOpenFileHandler(e -> mw.open(FileUtils.toPaths(e.getFiles())));
+				}
+			}
+		} catch (Throwable e) {
+			LOG.error("Failed to register open file handler", e);
+		}
 	}
 
 	private static void printSystemInfo() {
 		if (LOG.isDebugEnabled()) {
-			LOG.debug("Starting jadx-gui. Version: '{}'. JVM: {} {}. OS: {} {}",
-					SystemInfo.JADX_VERSION,
-					SystemInfo.JAVA_VM, SystemInfo.JAVA_VER,
-					SystemInfo.OS_NAME, SystemInfo.OS_VERSION);
+			LOG.debug("Starting jadx-gui: version: {}, bundle: {}. JVM: {} {}. OS: {}, version: {}, arch: {}",
+					Jadx.getVersion(), JadxBuildInfo.getJadxBundleType(),
+					JadxSystemInfo.JAVA_VM, JadxSystemInfo.JAVA_VER,
+					JadxSystemInfo.OS_NAME, JadxSystemInfo.OS_VERSION, JadxSystemInfo.OS_ARCH);
 		}
 	}
 }

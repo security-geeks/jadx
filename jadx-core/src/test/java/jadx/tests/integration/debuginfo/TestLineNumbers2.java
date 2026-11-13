@@ -1,21 +1,22 @@
 package jadx.tests.integration.debuginfo;
 
 import java.lang.ref.WeakReference;
-import java.util.Map;
 
-import org.junit.jupiter.api.Test;
-
+import jadx.api.CommentsLevel;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.IntegrationTest;
+import jadx.tests.api.extensions.profiles.TestProfile;
+import jadx.tests.api.extensions.profiles.TestWithProfiles;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestLineNumbers2 extends IntegrationTest {
 
 	public static class TestCls {
 		private WeakReference<TestCls> f;
 
-		// keep at line 18
+		// keep constructor at line 20
+		// ---
 		public TestCls(TestCls s) {
 		}
 
@@ -33,13 +34,17 @@ public class TestLineNumbers2 extends IntegrationTest {
 		}
 	}
 
-	@Test
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.JAVA8 })
 	public void test() {
+		getArgs().setCommentsLevel(CommentsLevel.NONE);
 		printLineNumbers();
 
 		ClassNode cls = getClassNode(TestCls.class);
-		Map<Integer, Integer> lineMapping = cls.getCode().getLineMapping();
-		assertEquals("{5=17, 8=18, 11=22, 12=23, 13=24, 14=28, 16=25, 17=26, 18=28, 21=31, 22=32}",
-				lineMapping.toString());
+		String linesMapStr = cls.getCode().getCodeMetadata().getLineMapping().toString();
+		if (isJavaInput()) {
+			assertThat(linesMapStr).isEqualTo("{5=18, 8=19, 11=23, 12=24, 13=25, 14=26, 15=27, 17=29, 20=32, 21=33}");
+		} else {
+			assertThat(linesMapStr).isEqualTo("{5=18, 8=19, 11=23, 12=24, 13=25, 14=26, 15=27, 16=29, 18=29, 21=32, 22=33}");
+		}
 	}
 }

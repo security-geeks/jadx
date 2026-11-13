@@ -1,45 +1,64 @@
 package jadx.gui.utils;
 
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Image;
 import java.awt.MouseInfo;
 import java.awt.Point;
+import java.awt.Rectangle;
 import java.awt.Toolkit;
 import java.awt.Window;
 import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.StringSelection;
 import java.awt.datatransfer.Transferable;
+import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseEvent;
+import java.io.File;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
+import javax.swing.AbstractAction;
 import javax.swing.Action;
 import javax.swing.Icon;
 import javax.swing.ImageIcon;
 import javax.swing.JComponent;
-import javax.swing.JDialog;
 import javax.swing.JOptionPane;
+import javax.swing.JTextField;
+import javax.swing.JTree;
 import javax.swing.KeyStroke;
+import javax.swing.RootPaneContainer;
 import javax.swing.SwingUtilities;
+import javax.swing.tree.TreeNode;
+import javax.swing.tree.TreePath;
 
 import org.intellij.lang.annotations.MagicConstant;
+import org.jetbrains.annotations.TestOnly;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.formdev.flatlaf.extras.FlatSVGIcon;
+
+import jadx.commons.app.JadxCommonEnv;
+import jadx.commons.app.JadxSystemInfo;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.utils.StringUtils;
+import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.gui.jobs.ITaskProgress;
 import jadx.gui.ui.codearea.AbstractCodeArea;
 
 public class UiUtils {
 	private static final Logger LOG = LoggerFactory.getLogger(UiUtils.class);
 
-	private static final ImageIcon ICON_STATIC = openIcon("static_co");
-	private static final ImageIcon ICON_FINAL = openIcon("final_co");
-	private static final ImageIcon ICON_ABSTRACT = openIcon("abstract_co");
-	private static final ImageIcon ICON_NATIVE = openIcon("native_co");
+	public static final boolean JADX_GUI_DEBUG = JadxCommonEnv.getBool("JADX_GUI_DEBUG", false);
 
 	/**
 	 * The minimum about of memory in bytes we are trying to keep free, otherwise the application may
@@ -53,7 +72,35 @@ public class UiUtils {
 	 */
 	public static final long MIN_FREE_MEMORY = calculateMinFreeMemory();
 
+	public static final Runnable EMPTY_RUNNABLE = new Runnable() {
+		@Override
+		public void run() {
+		}
+
+		@Override
+		public String toString() {
+			return "EMPTY_RUNNABLE";
+		}
+	};
+
+	private static final ExecutorService BACKGROUND_THREAD = Executors.newSingleThreadExecutor(Utils.simpleThreadFactory("utils-bg"));
+
 	private UiUtils() {
+	}
+
+	public static ImageIcon openSvgIcon(String name) {
+		String iconPath = "icons/" + name + ".svg";
+		FlatSVGIcon icon = new FlatSVGIcon(iconPath);
+		boolean found;
+		try {
+			found = icon.hasFound();
+		} catch (Exception e) {
+			throw new JadxRuntimeException("Failed to load icon: " + iconPath, e);
+		}
+		if (!found) {
+			throw new JadxRuntimeException("Icon not found: " + iconPath);
+		}
+		return icon;
 	}
 
 	public static ImageIcon openIcon(String name) {
@@ -73,6 +120,15 @@ public class UiUtils {
 		return Toolkit.getDefaultToolkit().createImage(resource);
 	}
 
+	public static void addKeyBinding(JComponent comp, KeyStroke key, String id, Runnable action) {
+		addKeyBinding(comp, key, id, new AbstractAction() {
+			@Override
+			public void actionPerformed(ActionEvent e) {
+				action.run();
+			}
+		});
+	}
+
 	public static void addKeyBinding(JComponent comp, KeyStroke key, String id, Action action) {
 		comp.getInputMap().put(key, id);
 		comp.getActionMap().put(id, action);
@@ -88,13 +144,45 @@ public class UiUtils {
 	}
 
 	public static String typeFormatHtml(String name, ArgType type) {
-		return "<html><body><nobr>" + escapeHtml(name)
-				+ "<span style='color:#888888;'> " + escapeHtml(typeStr(type)) + "</span>"
-				+ "</nobr></body></html>";
+		return wrapHtml(escapeHtml(name) + ' ' + fadeHtml(escapeHtml(typeStr(type))));
+	}
+
+	public static String fadeHtml(String htmlStr) {
+		return "<span style='color:#888888;'>" + htmlStr + "</span>"; // TODO: get color from theme
+	}
+
+	public static String wrapHtml(String htmlStr) {
+		return "<html><body><nobr>" + htmlStr + "</nobr></body></html>";
 	}
 
 	public static String escapeHtml(String str) {
-		return str.replace("<", "&lt;");
+		return str.replace("<", "&lt;").replace(">", "&gt;");
+	}
+
+	private static final String CUT_STR_REPLACE = "...";
+
+	public static String limitStringLength(String str, int maxLength) {
+		if (str.length() <= maxLength) {
+			return str;
+		}
+		char fileSepChar = File.separatorChar;
+		int firstFileSep = str.indexOf(fileSepChar);
+		if (firstFileSep != -1) {
+			// remove path parts
+			int lastFileSep = str.lastIndexOf(fileSepChar);
+			if (firstFileSep == lastFileSep) {
+				// single path char => cut before
+				str = CUT_STR_REPLACE + str.substring(lastFileSep - 1);
+			} else {
+				// cut middle
+				str = str.substring(0, firstFileSep + 1) + CUT_STR_REPLACE + str.substring(lastFileSep);
+			}
+			if (str.length() < maxLength) {
+				return str;
+			}
+		}
+		// cut end by default
+		return str.substring(0, maxLength - CUT_STR_REPLACE.length()) + CUT_STR_REPLACE;
 	}
 
 	public static String typeStr(ArgType type) {
@@ -102,18 +190,41 @@ public class UiUtils {
 			return "null";
 		}
 		if (type.isObject()) {
-			String cls = type.toString();
-			int dot = cls.lastIndexOf('.');
-			if (dot != -1) {
-				return cls.substring(dot + 1);
-			} else {
-				return cls;
+			if (type.isGenericType()) {
+				return type.getObject();
 			}
+			ArgType wt = type.getWildcardType();
+			if (wt != null) {
+				ArgType.WildcardBound bound = type.getWildcardBound();
+				if (bound == ArgType.WildcardBound.UNBOUND) {
+					return bound.getStr();
+				}
+				return bound.getStr() + typeStr(wt);
+			}
+			String objName = objectShortName(type.getObject());
+			ArgType outerType = type.getOuterType();
+			if (outerType != null) {
+				return typeStr(outerType) + '.' + objName;
+			}
+			List<ArgType> genericTypes = type.getGenericTypes();
+			if (genericTypes != null) {
+				String generics = Utils.listToString(genericTypes, ", ", UiUtils::typeStr);
+				return objName + '<' + generics + '>';
+			}
+			return objName;
 		}
 		if (type.isArray()) {
 			return typeStr(type.getArrayElement()) + "[]";
 		}
 		return type.toString();
+	}
+
+	private static String objectShortName(String obj) {
+		int dot = obj.lastIndexOf('.');
+		if (dot != -1) {
+			return obj.substring(dot + 1);
+		}
+		return obj;
 	}
 
 	public static OverlayIcon makeIcon(AccessInfo af, Icon pub, Icon pri, Icon pro, Icon def) {
@@ -129,16 +240,10 @@ public class UiUtils {
 		}
 		OverlayIcon overIcon = new OverlayIcon(icon);
 		if (af.isFinal()) {
-			overIcon.add(ICON_FINAL);
+			overIcon.add(Icons.FINAL);
 		}
 		if (af.isStatic()) {
-			overIcon.add(ICON_STATIC);
-		}
-		if (af.isAbstract()) {
-			overIcon.add(ICON_ABSTRACT);
-		}
-		if (af.isNative()) {
-			overIcon.add(ICON_NATIVE);
+			overIcon.add(Icons.STATIC);
 		}
 		return overIcon;
 	}
@@ -176,13 +281,6 @@ public class UiUtils {
 		return (long) (mem / (double) (1024L * 1024L)) + "MB";
 	}
 
-	/**
-	 * Adapt character case for case insensitive searches
-	 */
-	public static char caseChar(char ch, boolean toLower) {
-		return toLower ? Character.toLowerCase(ch) : ch;
-	}
-
 	public static void setClipboardString(String text) {
 		try {
 			Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
@@ -208,7 +306,7 @@ public class UiUtils {
 	@SuppressWarnings("deprecation")
 	@MagicConstant(flagsFromClass = InputEvent.class)
 	private static int getCtrlButton() {
-		if (SystemInfo.IS_MAC) {
+		if (JadxSystemInfo.IS_MAC) {
 			return Toolkit.getDefaultToolkit().getMenuShortcutKeyMask();
 		} else {
 			return InputEvent.CTRL_DOWN_MASK;
@@ -220,13 +318,13 @@ public class UiUtils {
 		return CTRL_BNT_KEY;
 	}
 
-	public static void showMessageBox(Component parent, String msg) {
-		JOptionPane.showMessageDialog(parent, msg);
+	public static boolean isCtrlDown(KeyEvent keyEvent) {
+		return keyEvent.getModifiersEx() == CTRL_BNT_KEY;
 	}
 
-	public static void addEscapeShortCutToDispose(JDialog dialog) {
+	public static <T extends Window & RootPaneContainer> void addEscapeShortCutToDispose(T window) {
 		KeyStroke stroke = KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0);
-		dialog.getRootPane().registerKeyboardAction(e -> dialog.dispose(), stroke, JComponent.WHEN_IN_FOCUSED_WINDOW);
+		window.getRootPane().registerKeyboardAction(e -> window.dispose(), stroke, JComponent.WHEN_IN_FOCUSED_WINDOW);
 	}
 
 	/**
@@ -249,5 +347,222 @@ public class UiUtils {
 		Point pos = MouseInfo.getPointerInfo().getLocation();
 		SwingUtilities.convertPointFromScreen(pos, comp);
 		return pos;
+	}
+
+	public static TreeNode getTreeNodeUnderMouse(JTree tree, MouseEvent mouseEvent) {
+		TreePath path = tree.getClosestPathForLocation(mouseEvent.getX(), mouseEvent.getY());
+		if (path == null) {
+			return null;
+		}
+		// allow 'closest' path only at the right of the item row
+		Rectangle pathBounds = tree.getPathBounds(path);
+		if (pathBounds != null) {
+			int y = mouseEvent.getY();
+			if (y < pathBounds.y || y > (pathBounds.y + pathBounds.height)) {
+				return null;
+			}
+			if (mouseEvent.getX() < pathBounds.x) {
+				// exclude expand/collapse events
+				return null;
+			}
+		}
+		Object obj = path.getLastPathComponent();
+		if (obj instanceof TreeNode) {
+			tree.setSelectionPath(path);
+			return (TreeNode) obj;
+		}
+		return null;
+	}
+
+	public static void showMessageBox(Component parent, String msg) {
+		JOptionPane.showMessageDialog(parent, msg);
+	}
+
+	public static void errorMessage(Component parent, String message) {
+		errorMessage(parent, NLS.str("message.errorTitle"), message);
+	}
+
+	public static void errorMessage(Component parent, String title, String message) {
+		LOG.error(message);
+		JOptionPane.showMessageDialog(parent, message, title, JOptionPane.ERROR_MESSAGE);
+	}
+
+	public static void copyToClipboard(String text) {
+		if (StringUtils.isEmpty(text)) {
+			return;
+		}
+		try {
+			Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
+			StringSelection selection = new StringSelection(text);
+			clipboard.setContents(selection, selection);
+		} catch (Exception e) {
+			LOG.error("Failed copy text to clipboard", e);
+		}
+	}
+
+	/**
+	 * Owner field in Clipboard class can store reference to CodeArea.
+	 * This prevents from garbage collection whole jadx object tree and cause memory leak.
+	 * Trying to lost ownership by new empty selection.
+	 */
+	public static void resetClipboardOwner() {
+		try {
+			Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemSelection();
+			if (clipboard != null) {
+				StringSelection selection = new StringSelection("");
+				clipboard.setContents(selection, selection);
+			}
+		} catch (Exception e) {
+			LOG.error("Failed to reset clipboard owner", e);
+		}
+	}
+
+	public static int calcProgress(ITaskProgress taskProgress) {
+		return calcProgress(taskProgress.progress(), taskProgress.total());
+	}
+
+	public static int calcProgress(long done, long total) {
+		if (done > total) {
+			LOG.debug("Task progress has invalid values: done={}, total={}", done, total);
+			return 100;
+		}
+		return Math.round(done * 100 / (float) total);
+	}
+
+	public static void sleep(int ms) {
+		try {
+			Thread.sleep(ms);
+		} catch (InterruptedException e) {
+			// ignore
+		}
+	}
+
+	public static void uiRun(Runnable runnable) {
+		SwingUtilities.invokeLater(runnable);
+	}
+
+	public static void uiRunAndWait(Runnable runnable) {
+		if (SwingUtilities.isEventDispatchThread()) {
+			runnable.run();
+			return;
+		}
+		try {
+			SwingUtilities.invokeAndWait(runnable);
+		} catch (InterruptedException e) {
+			LOG.warn("UI thread interrupted, runnable: {}", runnable, e);
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	/**
+	 * Run task in background thread.
+	 * Uses single thread, so all tasks are ordered.
+	 */
+	public static void bgRun(Runnable runnable) {
+		BACKGROUND_THREAD.execute(runnable);
+	}
+
+	public static void uiThreadGuard() {
+		if (JADX_GUI_DEBUG && !SwingUtilities.isEventDispatchThread()) {
+			LOG.warn("Expect UI thread, got: {}", Thread.currentThread(), new JadxRuntimeException());
+		}
+	}
+
+	public static void notUiThreadGuard() {
+		if (JADX_GUI_DEBUG && SwingUtilities.isEventDispatchThread()) {
+			LOG.warn("Expect background thread, got: {}", Thread.currentThread(), new JadxRuntimeException());
+		}
+	}
+
+	@TestOnly
+	public static void debugTimer(int periodInSeconds, Runnable action) {
+		if (!LOG.isDebugEnabled()) {
+			return;
+		}
+		Timer timer = new Timer();
+		timer.scheduleAtFixedRate(new TimerTask() {
+			@Override
+			public void run() {
+				action.run();
+			}
+		}, 0, periodInSeconds * 1000L);
+	}
+
+	@TestOnly
+	public static void printStackTrace(String label) {
+		LOG.debug("StackTrace: {}", label, new Exception(label));
+	}
+
+	public static boolean isDarkTheme(Color background) {
+		double brightness = (background.getRed() * 0.299
+				+ background.getGreen() * 0.587
+				+ background.getBlue() * 0.114) / 255;
+		return brightness < 0.5;
+	}
+
+	/**
+	 * Adjusts the brightness of a given {@code Color} object without altering its hue or saturation.
+	 *
+	 * <p>
+	 * This method converts the input RGB color to the HSB (Hue, Saturation, Brightness) color model,
+	 * multiplies its brightness component by the specified {@code factor}, and then converts it back
+	 * to a new RGB {@code Color} object.
+	 * </p>
+	 *
+	 * <p>
+	 * The new brightness value is capped at {@code 1.0f} (maximum HSB brightness) to prevent
+	 * colors from becoming invalid or exceeding full brightness.
+	 * </p>
+	 *
+	 * How to use:
+	 * <ul>
+	 * <li>To make a color **brighter**: Use a {@code factor} greater than {@code 1.0f} (e.g.,
+	 * {@code 1.2f}, {@code 1.5f}).</li>
+	 * <li>To make a color **darker**: Use a {@code factor} less than {@code 1.0f} (e.g., {@code 0.8f},
+	 * {@code 0.5f}).</li>
+	 * <li>To keep the brightness **unchanged**: Use a {@code factor} of {@code 1.0f}.</li>
+	 * </ul>
+	 *
+	 * <pre>{@code
+	 * // Example usage:
+	 * Color originalColor = Color.BLUE;
+	 *
+	 * // Make the blue color 50% brighter (factor 1.5)
+	 * Color brighterBlue = adjustBrightness(originalColor, 1.5f);
+	 *
+	 * // Make the blue color 30% darker (factor 0.7)
+	 * Color darkerBlue = adjustBrightness(originalColor, 0.7f);
+	 *
+	 * // Get the brightest possible version of the color (will cap at 1.0 brightness)
+	 * Color maxBrightnessBlue = adjustBrightness(originalColor, 10.0f);
+	 *
+	 * // Get a very dark, almost black version
+	 * Color veryDarkBlue = adjustBrightness(originalColor, 0.1f);
+	 * }</pre>
+	 *
+	 * @param color  The original {@code Color} object whose brightness needs to be adjusted.
+	 * @param factor The multiplier for the brightness.
+	 * @return A new {@code Color} object with the adjusted brightness.
+	 * @see java.awt.Color#RGBtoHSB(int, int, int, float[])
+	 * @see java.awt.Color#getHSBColor(float, float, float)
+	 */
+	public static Color adjustBrightness(Color color, float factor) {
+		float[] hsb = Color.RGBtoHSB(color.getRed(), color.getGreen(), color.getBlue(), null);
+		hsb[2] = Math.min(1.0f, hsb[2] * factor); // Adjust brightness
+		return Color.getHSBColor(hsb[0], hsb[1], hsb[2]);
+	}
+
+	public static void highlightAsErrorField(final JTextField field, boolean isError) {
+		if (isError) {
+			field.putClientProperty("JComponent.outline", "error");
+		} else {
+			field.putClientProperty("JComponent.outline", "");
+		}
+		field.repaint();
+	}
+
+	public static boolean nearlyEqual(float a, float b) {
+		return Math.abs(a - b) < 1E-6f;
 	}
 }

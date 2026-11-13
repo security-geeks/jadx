@@ -13,11 +13,12 @@ import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.utils.InsnRemover;
+import jadx.core.utils.InsnUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 /**
- * Instruction argument,
- * argument can be register, literal or instruction
+ * Instruction argument.
+ * Can be: register, literal, instruction or name
  */
 public abstract class InsnArg extends Typed {
 
@@ -130,15 +131,21 @@ public abstract class InsnArg extends Typed {
 				}
 			}
 		}
+		RegisterArg resArg = insn.getResult();
 		InsnArg arg = wrapInsnIntoArg(insn);
 		InsnArg oldArg = parent.getArg(i);
+		if (arg.getType() == ArgType.UNKNOWN) {
+			// restore arg type if wrapped insn missing result
+			arg.setType(oldArg.getType());
+		}
 		parent.setArg(i, arg);
 		InsnRemover.unbindArgUsage(mth, oldArg);
 		if (unbind) {
 			InsnRemover.unbindArgUsage(mth, this);
+		}
+		if (resArg != null && !insn.contains(AFlag.FORCE_ASSIGN_INLINE)) {
 			// result not needed in wrapped insn
 			InsnRemover.unbindResult(mth, insn);
-			insn.setResult(null);
 		}
 		return arg;
 	}
@@ -209,7 +216,20 @@ public abstract class InsnArg extends Typed {
 	}
 
 	public boolean isZeroLiteral() {
-		return isLiteral() && (((LiteralArg) this)).getLiteral() == 0;
+		return false;
+	}
+
+	public boolean isZeroConst() {
+		if (isZeroLiteral()) {
+			return true;
+		}
+		if (isInsnWrap()) {
+			InsnNode wrapInsn = ((InsnWrapArg) this).getWrapInsn();
+			if (wrapInsn.getType() == InsnType.CONST) {
+				return wrapInsn.getArg(0).isZeroLiteral();
+			}
+		}
+		return false;
 	}
 
 	public boolean isFalse() {
@@ -232,8 +252,71 @@ public abstract class InsnArg extends Typed {
 		return contains(AFlag.THIS);
 	}
 
+	/**
+	 * Return true for 'this' from other classes (often occur in anonymous classes)
+	 */
+	public boolean isAnyThis() {
+		if (contains(AFlag.THIS)) {
+			return true;
+		}
+		InsnNode wrappedInsn = unwrap();
+		if (wrappedInsn != null && wrappedInsn.getType() == InsnType.IGET) {
+			return wrappedInsn.getArg(0).isAnyThis();
+		}
+		return false;
+	}
+
+	public InsnNode unwrap() {
+		if (isInsnWrap()) {
+			return ((InsnWrapArg) this).getWrapInsn();
+		}
+		return null;
+	}
+
 	public boolean isConst() {
 		return isLiteral() || (isInsnWrap() && ((InsnWrapArg) this).getWrapInsn().isConstInsn());
+	}
+
+	public boolean isSameConst(InsnArg other) {
+		if (isConst() && other.isConst()) {
+			return this.equals(other);
+		}
+		return false;
+	}
+
+	public boolean isSameVar(RegisterArg arg) {
+		if (arg == null) {
+			return false;
+		}
+		if (isRegister()) {
+			return ((RegisterArg) this).sameRegAndSVar(arg);
+		}
+		return false;
+	}
+
+	public boolean isSameVar(SSAVar ssaVar) {
+		if (ssaVar == null) {
+			return false;
+		}
+		if (isRegister()) {
+			SSAVar thisSsaVar = ((RegisterArg) this).getSVar();
+			return Objects.equals(thisSsaVar, ssaVar);
+		}
+		return false;
+	}
+
+	public boolean isSameCodeVar(RegisterArg arg) {
+		if (arg == null) {
+			return false;
+		}
+		if (isRegister()) {
+			return ((RegisterArg) this).sameCodeVar(arg);
+		}
+		return false;
+	}
+
+	public boolean isUseVar(RegisterArg arg) {
+		return InsnUtils.containsVar(this, arg);
 	}
 
 	protected final <T extends InsnArg> T copyCommonParams(T copy) {
@@ -242,7 +325,9 @@ public abstract class InsnArg extends Typed {
 		return copy;
 	}
 
-	public InsnArg duplicate() {
-		return this;
+	public abstract InsnArg duplicate();
+
+	public String toShortString() {
+		return this.toString();
 	}
 }

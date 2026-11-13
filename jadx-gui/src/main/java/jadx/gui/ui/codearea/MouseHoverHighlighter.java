@@ -3,22 +3,24 @@ package jadx.gui.ui.codearea;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
 
-import javax.swing.text.Highlighter;
+import javax.swing.text.Caret;
 
 import org.fife.ui.rsyntaxtextarea.Token;
-import org.fife.ui.rsyntaxtextarea.TokenTypes;
 import org.fife.ui.rtextarea.SmartHighlightPainter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.api.JavaNode;
+import jadx.gui.treemodel.JNode;
+import jadx.gui.ui.MainWindow;
+import jadx.gui.utils.JNodeCache;
 
 class MouseHoverHighlighter extends MouseMotionAdapter {
 	private static final Logger LOG = LoggerFactory.getLogger(MouseHoverHighlighter.class);
 
 	private final CodeArea codeArea;
 	private final CodeLinkGenerator codeLinkGenerator;
-	private final Highlighter.HighlightPainter highlighter;
+	private final SmartHighlightPainter highlighter;
 
 	private Object tag;
 	private int highlightedTokenOffset = -1;
@@ -26,7 +28,12 @@ class MouseHoverHighlighter extends MouseMotionAdapter {
 	public MouseHoverHighlighter(CodeArea codeArea, CodeLinkGenerator codeLinkGenerator) {
 		this.codeArea = codeArea;
 		this.codeLinkGenerator = codeLinkGenerator;
-		this.highlighter = new SmartHighlightPainter(codeArea.getMarkOccurrencesColor());
+		this.highlighter = new SmartHighlightPainter();
+		loadSettings();
+	}
+
+	public void loadSettings() {
+		highlighter.setPaint(codeArea.getMarkOccurrencesColor());
 	}
 
 	@Override
@@ -40,9 +47,14 @@ class MouseHoverHighlighter extends MouseMotionAdapter {
 		if (e.getModifiersEx() != 0) {
 			return false;
 		}
+		Caret caret = codeArea.getCaret();
+		if (caret.getDot() != caret.getMark()) {
+			// selection in action, highlight will interfere with selection
+			return false;
+		}
 		try {
 			Token token = codeArea.viewToToken(e.getPoint());
-			if (token == null || token.getType() != TokenTypes.IDENTIFIER) {
+			if (token == null) {
 				return false;
 			}
 			int tokenOffset = token.getOffset();
@@ -50,13 +62,14 @@ class MouseHoverHighlighter extends MouseMotionAdapter {
 				// don't repaint highlight
 				return true;
 			}
-			JavaNode nodeAtOffset = codeLinkGenerator.getNodeAtOffset(codeArea, tokenOffset);
+			JavaNode nodeAtOffset = codeLinkGenerator.getNodeAtOffset(tokenOffset);
 			if (nodeAtOffset == null) {
 				return false;
 			}
 			removeHighlight();
 			tag = codeArea.getHighlighter().addHighlight(tokenOffset, token.getEndOffset(), this.highlighter);
 			highlightedTokenOffset = tokenOffset;
+			updateToolTip(nodeAtOffset);
 			return true;
 		} catch (Exception exc) {
 			LOG.error("Mouse hover highlight error", exc);
@@ -69,6 +82,18 @@ class MouseHoverHighlighter extends MouseMotionAdapter {
 			codeArea.getHighlighter().removeHighlight(tag);
 			tag = null;
 			highlightedTokenOffset = -1;
+			updateToolTip(null);
 		}
+	}
+
+	private void updateToolTip(JavaNode node) {
+		MainWindow mainWindow = codeArea.getMainWindow();
+		if (node == null || mainWindow.getSettings().isDisableTooltipOnHover()) {
+			codeArea.setToolTipText(null);
+			return;
+		}
+		JNodeCache nodeCache = mainWindow.getCacheObject().getNodeCache();
+		JNode jNode = nodeCache.makeFrom(node);
+		codeArea.setToolTipText(jNode.getTooltip());
 	}
 }

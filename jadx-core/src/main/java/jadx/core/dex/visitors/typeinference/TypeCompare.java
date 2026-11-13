@@ -9,6 +9,7 @@ import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.ArgType.WildcardBound;
 import jadx.core.dex.instructions.args.PrimitiveType;
@@ -17,6 +18,7 @@ import jadx.core.dex.nodes.RootNode;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 import static jadx.core.dex.visitors.typeinference.TypeCompareEnum.CONFLICT;
+import static jadx.core.dex.visitors.typeinference.TypeCompareEnum.CONFLICT_BY_GENERIC;
 import static jadx.core.dex.visitors.typeinference.TypeCompareEnum.EQUAL;
 import static jadx.core.dex.visitors.typeinference.TypeCompareEnum.NARROW;
 import static jadx.core.dex.visitors.typeinference.TypeCompareEnum.NARROW_BY_GENERIC;
@@ -40,6 +42,17 @@ public class TypeCompare {
 
 	public TypeCompareEnum compareTypes(ClassNode first, ClassNode second) {
 		return compareObjects(first.getType(), second.getType());
+	}
+
+	public TypeCompareEnum compareTypes(ClassInfo first, ClassInfo second) {
+		return compareObjects(first.getType(), second.getType());
+	}
+
+	public TypeCompareEnum compareObjects(ArgType first, ArgType second) {
+		if (first == second || Objects.equals(first, second)) {
+			return TypeCompareEnum.EQUAL;
+		}
+		return compareObjectsNoPreCheck(first, second);
 	}
 
 	/**
@@ -81,7 +94,7 @@ public class TypeCompare {
 		boolean firstObj = first.isObject();
 		boolean secondObj = second.isObject();
 		if (firstObj && secondObj) {
-			return compareObjects(first, second);
+			return compareObjectsNoPreCheck(first, second);
 		} else {
 			// primitive types conflicts with objects
 			if (firstObj && secondPrimitive) {
@@ -92,13 +105,7 @@ public class TypeCompare {
 			}
 		}
 		if (firstPrimitive && secondPrimitive) {
-			PrimitiveType firstPrimitiveType = first.getPrimitiveType();
-			PrimitiveType secondPrimitiveType = second.getPrimitiveType();
-			if (firstPrimitiveType == PrimitiveType.BOOLEAN
-					|| secondPrimitiveType == PrimitiveType.BOOLEAN) {
-				return CONFLICT;
-			}
-			return firstPrimitiveType.compareTo(secondPrimitiveType) > 0 ? WIDER : NARROW;
+			return comparePrimitives(first.getPrimitiveType(), second.getPrimitiveType());
 		}
 
 		LOG.warn("Type compare function not complete, can't compare {} and {}", first, second);
@@ -151,7 +158,7 @@ public class TypeCompare {
 		return CONFLICT;
 	}
 
-	private TypeCompareEnum compareObjects(ArgType first, ArgType second) {
+	private TypeCompareEnum compareObjectsNoPreCheck(ArgType first, ArgType second) {
 		boolean objectsEquals = first.getObject().equals(second.getObject());
 		boolean firstGenericType = first.isGenericType();
 		boolean secondGenericType = second.isGenericType();
@@ -245,16 +252,19 @@ public class TypeCompare {
 		if (objType.isGenericType()) {
 			return compareTypeVariables(genericType, objType);
 		}
-
+		if (objType.isWildcard()) {
+			return CONFLICT_BY_GENERIC;
+		}
+		boolean rootObject = objType.equals(ArgType.OBJECT);
 		List<ArgType> extendTypes = genericType.getExtendTypes();
 		if (extendTypes.isEmpty()) {
-			return NARROW;
+			return rootObject ? NARROW : CONFLICT;
 		}
-		if (extendTypes.contains(objType) || objType.equals(ArgType.OBJECT)) {
+		if (extendTypes.contains(objType) || rootObject) {
 			return NARROW;
 		}
 		for (ArgType extendType : extendTypes) {
-			TypeCompareEnum res = compareObjects(extendType, objType);
+			TypeCompareEnum res = compareObjectsNoPreCheck(extendType, objType);
 			if (!res.isNarrow()) {
 				return res;
 			}
@@ -294,6 +304,60 @@ public class TypeCompare {
 			return result;
 		}
 		return extendTypes;
+	}
+
+	private TypeCompareEnum comparePrimitives(PrimitiveType type1, PrimitiveType type2) {
+		if (type1 == PrimitiveType.BOOLEAN || type2 == PrimitiveType.BOOLEAN) {
+			return type1 == type2 ? EQUAL : CONFLICT;
+		}
+
+		if (type1 == PrimitiveType.VOID || type2 == PrimitiveType.VOID) {
+			return type1 == type2 ? EQUAL : CONFLICT;
+		}
+
+		if (type1 == PrimitiveType.BYTE && type2 == PrimitiveType.CHAR) {
+			return WIDER;
+		}
+
+		if (type1 == PrimitiveType.SHORT && type2 == PrimitiveType.CHAR) {
+			return WIDER;
+		}
+
+		int type1Width = getTypeWidth(type1);
+		int type2Width = getTypeWidth(type2);
+		if (type1Width > type2Width) {
+			return WIDER;
+		} else if (type1Width < type2Width) {
+			return NARROW;
+		} else {
+			return EQUAL;
+		}
+	}
+
+	private byte getTypeWidth(PrimitiveType type) {
+		switch (type) {
+			case BYTE:
+				return 0;
+			case SHORT:
+				return 1;
+			case CHAR:
+				return 2;
+			case INT:
+				return 3;
+			case LONG:
+				return 4;
+			case FLOAT:
+				return 5;
+			case DOUBLE:
+				return 6;
+			case BOOLEAN:
+			case OBJECT:
+			case ARRAY:
+			case VOID:
+				throw new JadxRuntimeException("Type " + type + " should not be here");
+		}
+
+		throw new JadxRuntimeException("Unhandled type: " + type);
 	}
 
 	public Comparator<ArgType> getComparator() {

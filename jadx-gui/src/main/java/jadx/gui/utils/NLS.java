@@ -1,6 +1,5 @@
 package jadx.gui.utils;
 
-import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.net.URL;
@@ -13,14 +12,16 @@ import java.util.PropertyResourceBundle;
 import java.util.ResourceBundle;
 import java.util.Vector;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public class NLS {
+	private static final Logger LOG = LoggerFactory.getLogger(NLS.class);
 
 	private static final Vector<LangLocale> LANG_LOCALES = new Vector<>();
-
 	private static final Map<LangLocale, ResourceBundle> LANG_LOCALES_MAP = new HashMap<>();
-
 	private static final ResourceBundle FALLBACK_MESSAGES_MAP;
 	private static final LangLocale LOCAL_LOCALE;
 
@@ -33,52 +34,50 @@ public class NLS {
 
 		LANG_LOCALES.add(new LangLocale("en", "US")); // As default language
 		LANG_LOCALES.add(new LangLocale("zh", "CN"));
+		LANG_LOCALES.add(new LangLocale("zh", "TW"));
 		LANG_LOCALES.add(new LangLocale("es", "ES"));
 		LANG_LOCALES.add(new LangLocale("de", "DE"));
 		LANG_LOCALES.add(new LangLocale("ko", "KR"));
+		LANG_LOCALES.add(new LangLocale("pt", "BR"));
+		LANG_LOCALES.add(new LangLocale("ru", "RU"));
+		LANG_LOCALES.add(new LangLocale("id", "ID"));
+		LANG_LOCALES.add(new LangLocale("vi", "VN"));
 
 		LANG_LOCALES.forEach(NLS::load);
 
 		LangLocale defLang = LANG_LOCALES.get(0);
 		FALLBACK_MESSAGES_MAP = LANG_LOCALES_MAP.get(defLang);
-		localizedMessagesMap = LANG_LOCALES_MAP.get(defLang);
 	}
 
 	private NLS() {
 	}
 
-	private static void load(LangLocale locale) {
-		ResourceBundle bundle;
-		ClassLoader classLoader = ClassLoader.getSystemClassLoader();
-		String resName = String.format("i18n/Messages_%s.properties", locale.get());
-		URL bundleUrl = classLoader.getResource(resName);
+	private static void load(LangLocale lang) {
+		Locale locale = lang.get();
+		String resName = String.format("i18n/Messages_%s.properties", locale.toLanguageTag().replace('-', '_'));
+		URL bundleUrl = NLS.class.getClassLoader().getResource(resName);
 		if (bundleUrl == null) {
 			throw new JadxRuntimeException("Locale resource not found: " + resName);
 		}
+		ResourceBundle bundle;
 		try (Reader reader = new InputStreamReader(bundleUrl.openStream(), StandardCharsets.UTF_8)) {
 			bundle = new PropertyResourceBundle(reader);
-		} catch (IOException e) {
+		} catch (Exception e) {
 			throw new JadxRuntimeException("Failed to load " + resName, e);
 		}
-		LANG_LOCALES_MAP.put(locale, bundle);
+		LANG_LOCALES_MAP.put(lang, bundle);
 	}
 
 	public static String str(String key) {
 		try {
 			return localizedMessagesMap.getString(key);
-		} catch (Exception e) {
-			return FALLBACK_MESSAGES_MAP.getString(key);
+		} catch (MissingResourceException e) {
+			return getFallbackString(key);
 		}
 	}
 
 	public static String str(String key, Object... parameters) {
-		String value;
-		try {
-			value = localizedMessagesMap.getString(key);
-		} catch (MissingResourceException e) {
-			value = FALLBACK_MESSAGES_MAP.getString(key); // definitely exists
-		}
-		return String.format(value, parameters);
+		return String.format(str(key), parameters);
 	}
 
 	public static String str(String key, LangLocale locale) {
@@ -90,7 +89,16 @@ public class NLS {
 				// use fallback string
 			}
 		}
-		return FALLBACK_MESSAGES_MAP.getString(key); // definitely exists
+		return getFallbackString(key);
+	}
+
+	private static String getFallbackString(String key) {
+		try {
+			return FALLBACK_MESSAGES_MAP.getString(key);
+		} catch (Exception ex) {
+			LOG.error("Missing fallback value for key: {}", key, ex);
+			return key;
+		}
 	}
 
 	public static void setLocale(LangLocale locale) {
@@ -114,7 +122,7 @@ public class NLS {
 		if (LANG_LOCALES_MAP.containsKey(LOCAL_LOCALE)) {
 			return LOCAL_LOCALE;
 		}
-		// fallback to english if unsupported
+		// fallback to English if unsupported
 		return LANG_LOCALES.get(0);
 	}
 }

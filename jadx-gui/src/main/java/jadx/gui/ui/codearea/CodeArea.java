@@ -4,6 +4,11 @@ import java.awt.Point;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import javax.swing.JPopupMenu;
 import javax.swing.event.PopupMenuEvent;
@@ -11,104 +16,199 @@ import javax.swing.event.PopupMenuEvent;
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
 import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenTypes;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import jadx.api.CodePosition;
-import jadx.api.JadxDecompiler;
+import jadx.api.ICodeInfo;
+import jadx.api.JavaClass;
 import jadx.api.JavaNode;
-import jadx.gui.jobs.IndexJob;
+import jadx.api.metadata.ICodeAnnotation;
+import jadx.api.metadata.ICodeMetadata;
+import jadx.gui.JadxWrapper;
+import jadx.gui.jobs.IBackgroundTask;
+import jadx.gui.jobs.LoadTask;
+import jadx.gui.jobs.TaskWithExtraOnFinish;
 import jadx.gui.settings.JadxProject;
 import jadx.gui.treemodel.JClass;
+import jadx.gui.treemodel.JLoadableNode;
 import jadx.gui.treemodel.JNode;
-import jadx.gui.ui.ContentPanel;
+import jadx.gui.treemodel.JResource;
 import jadx.gui.ui.MainWindow;
+import jadx.gui.ui.action.ActionModel;
+import jadx.gui.ui.action.CommentSearchAction;
+import jadx.gui.ui.action.CopyReferenceAction;
+import jadx.gui.ui.action.CopySmaliReferenceAction;
+import jadx.gui.ui.action.FindUsageAction;
+import jadx.gui.ui.action.FridaAction;
+import jadx.gui.ui.action.GoToDeclarationAction;
+import jadx.gui.ui.action.JsonPrettifyAction;
+import jadx.gui.ui.action.RenameAction;
+import jadx.gui.ui.action.ViewCallGraphAction;
+import jadx.gui.ui.action.ViewClassInheritanceGraphAction;
+import jadx.gui.ui.action.ViewClassMethodGraphAction;
+import jadx.gui.ui.action.ViewControlFlowGraphAction;
+import jadx.gui.ui.action.XposedAction;
+import jadx.gui.ui.codearea.mode.JCodeMode;
+import jadx.gui.ui.codearea.sync.CodeAreaSyncee;
+import jadx.gui.ui.codearea.sync.CodeAreaSyncer;
+import jadx.gui.ui.codearea.sync.CodeAreaSyncerAbstractFactory;
+import jadx.gui.ui.codearea.sync.JavaSyncer;
+import jadx.gui.ui.panel.ContentPanel;
 import jadx.gui.utils.CaretPositionFix;
 import jadx.gui.utils.DefaultPopupMenuListener;
 import jadx.gui.utils.JNodeCache;
 import jadx.gui.utils.JumpPosition;
 import jadx.gui.utils.UiUtils;
+import jadx.gui.utils.shortcut.ShortcutsController;
 
 /**
  * The {@link AbstractCodeArea} implementation used for displaying Java code and text based
  * resources (e.g. AndroidManifest.xml)
  */
-public final class CodeArea extends AbstractCodeArea {
+public final class CodeArea extends AbstractCodeArea implements CodeAreaSyncerAbstractFactory, CodeAreaSyncee {
 	private static final Logger LOG = LoggerFactory.getLogger(CodeArea.class);
 
 	private static final long serialVersionUID = 6312736869579635796L;
 
-	CodeArea(ContentPanel contentPanel) {
-		super(contentPanel);
-		setSyntaxEditingStyle(node.getSyntaxName());
+	private @Nullable ICodeInfo cachedCodeInfo;
+	private @Nullable MouseHoverHighlighter mouseHoverHighlighter;
+	private final ShortcutsController shortcutsController;
 
-		boolean isJavaCode = node instanceof JClass;
+	CodeArea(ContentPanel contentPanel, JNode node) {
+		super(contentPanel, node);
+		this.shortcutsController = getMainWindow().getShortcutsController();
+
+		setSyntaxEditingStyle(node.getSyntaxName());
+		boolean isJavaCode = isCodeNode();
 		if (isJavaCode) {
 			((RSyntaxDocument) getDocument()).setSyntaxStyle(new JadxTokenMaker(this));
-			addMenuItems();
+		}
+
+		if (node instanceof JResource && node.makeString().endsWith(".json")) {
+			addMenuForJsonFile();
 		}
 
 		setHyperlinksEnabled(true);
+		setCodeFoldingEnabled(true);
 		setLinkScanningMask(InputEvent.CTRL_DOWN_MASK);
 		CodeLinkGenerator codeLinkGenerator = new CodeLinkGenerator(this);
 		setLinkGenerator(codeLinkGenerator);
 		addMouseListener(new MouseAdapter() {
 			@Override
 			public void mouseClicked(MouseEvent e) {
-				if (e.getClickCount() % 2 == 0 || e.isControlDown()) {
-					navToDecl(e.getPoint(), codeLinkGenerator);
+				if (e.isControlDown() || jumpOnDoubleClick(e)) {
+					navToDecl(e.getPoint());
 				}
 			}
 		});
 
 		if (isJavaCode) {
-			addMouseMotionListener(new MouseHoverHighlighter(this, codeLinkGenerator));
-		}
-	}
-
-	@SuppressWarnings("deprecation")
-	private void navToDecl(Point point, CodeLinkGenerator codeLinkGenerator) {
-		int offs = viewToModel(point);
-		JumpPosition jump = codeLinkGenerator.getJumpLinkAtOffset(CodeArea.this, offs);
-		if (jump != null) {
-			contentPanel.getTabbedPane().codeJump(jump);
+			mouseHoverHighlighter = new MouseHoverHighlighter(this, codeLinkGenerator);
+			addMouseMotionListener(mouseHoverHighlighter);
 		}
 	}
 
 	@Override
-	public void load() {
-		if (getText().isEmpty()) {
-			setText(node.getContent());
-			setCaretPosition(0);
+	public void loadSettings() {
+		super.loadSettings();
+		if (mouseHoverHighlighter != null) {
+			mouseHoverHighlighter.loadSettings();
 		}
+	}
+
+	public boolean isCodeNode() {
+		return node instanceof JClass || node instanceof JCodeMode;
+	}
+
+	private boolean jumpOnDoubleClick(MouseEvent e) {
+		return e.getClickCount() == 2 && getMainWindow().getSettings().isJumpOnDoubleClick();
+	}
+
+	private void navToDecl(Point point) {
+		int offs = viewToModel2D(point);
+		JNode node = getJNodeAtOffset(adjustOffsetForWordToken(offs));
+		if (node != null) {
+			contentPanel.getTabsController().codeJump(node);
+		}
+	}
+
+	@Override
+	public ICodeInfo getCodeInfo() {
+		if (cachedCodeInfo == null) {
+			if (isDisposed()) {
+				LOG.debug("CodeArea used after dispose!");
+				return ICodeInfo.EMPTY;
+			}
+			cachedCodeInfo = Objects.requireNonNull(node.getCodeInfo());
+		}
+		return cachedCodeInfo;
+	}
+
+	@Override
+	public IBackgroundTask getLoadTask() {
+		if (node instanceof JLoadableNode) {
+			IBackgroundTask loadTask = ((JLoadableNode) node).getLoadTask();
+			if (loadTask != null) {
+				return new TaskWithExtraOnFinish(loadTask, () -> {
+					setText(getCodeInfo().getCodeStr());
+					setCaretPosition(0);
+					setLoaded();
+				});
+			}
+		}
+		return new LoadTask<>(
+				() -> getCodeInfo().getCodeStr(),
+				code -> {
+					setText(code);
+					setCaretPosition(0);
+					setLoaded();
+				});
 	}
 
 	@Override
 	public void refresh() {
-		setText(node.getContent());
+		cachedCodeInfo = null;
+		setText(getCodeInfo().getCodeStr());
 	}
 
-	private void addMenuItems() {
-		FindUsageAction findUsage = new FindUsageAction(this);
-		GoToDeclarationAction goToDeclaration = new GoToDeclarationAction(this);
-		RenameAction rename = new RenameAction(this);
-		CommentAction comment = new CommentAction(this);
+	@Override
+	protected JPopupMenu createPopupMenu() {
+		JPopupMenu popup = super.createPopupMenu();
+		if (node instanceof JClass) {
+			appendCodeMenuItems(popup);
+		}
+		return popup;
+	}
 
-		JPopupMenu popup = getPopupMenu();
+	private void appendCodeMenuItems(JPopupMenu popupMenu) {
+		ShortcutsController shortcutsController = getMainWindow().getShortcutsController();
+		JNodePopupBuilder popup = new JNodePopupBuilder(this, popupMenu, shortcutsController);
 		popup.addSeparator();
-		popup.add(findUsage);
-		popup.add(goToDeclaration);
-		popup.add(comment);
+		popup.add(new FindUsageAction(this));
+		popup.add(new UsageDialogPlusAction(this));
+		popup.add(new GoToDeclarationAction(this));
+		popup.add(new CommentAction(this));
 		popup.add(new CommentSearchAction(this));
-		popup.add(rename);
-		popup.addPopupMenuListener(findUsage);
-		popup.addPopupMenuListener(goToDeclaration);
-		popup.addPopupMenuListener(comment);
-		popup.addPopupMenuListener(rename);
+		popup.add(new RenameAction(this));
+		popup.add(new CopyReferenceAction(this));
+		popup.add(new CopySmaliReferenceAction(this));
+		popup.addSeparator();
+		popup.add(new FridaAction(this));
+		popup.add(new XposedAction(this));
+		popup.addSeparator();
+		popup.add(new ViewClassInheritanceGraphAction(this));
+		popup.add(new ViewClassMethodGraphAction(this));
+		popup.add(new ViewCallGraphAction(this));
+		popup.add(new ViewControlFlowGraphAction(ActionModel.VIEW_CONTROL_FLOW_GRAPH, this));
+		popup.addSeparator();
+		popup.add(new ConvertNumberAction(this));
+
+		getMainWindow().getGuiPluginsManager().getPluginsContext().appendPopupMenus(this, popup);
 
 		// move caret on mouse right button click
-		popup.addPopupMenuListener(new DefaultPopupMenuListener() {
+		popupMenu.addPopupMenuListener(new DefaultPopupMenuListener() {
 			@Override
 			public void popupMenuWillBecomeVisible(PopupMenuEvent e) {
 				CodeArea codeArea = CodeArea.this;
@@ -122,35 +222,39 @@ public final class CodeArea extends AbstractCodeArea {
 		});
 	}
 
-	public int adjustOffsetForToken(@Nullable Token token) {
+	private void addMenuForJsonFile() {
+		ShortcutsController shortcutsController = getMainWindow().getShortcutsController();
+		JNodePopupBuilder popup = new JNodePopupBuilder(this, getPopupMenu(), shortcutsController);
+		popup.addSeparator();
+		popup.add(new JsonPrettifyAction(this));
+	}
+
+	/**
+	 * Search start of word token at specified offset
+	 *
+	 * @return -1 if no word token found
+	 */
+	public int adjustOffsetForWordToken(int offset) {
+		Token token = getWordTokenAtOffset(offset);
 		if (token == null) {
 			return -1;
 		}
 		int type = token.getType();
-		final int sourceOffset;
-		if (node instanceof JClass) {
-			if (type == TokenTypes.IDENTIFIER) {
-				sourceOffset = token.getOffset();
-			} else if (type == TokenTypes.ANNOTATION && token.length() > 1) {
-				sourceOffset = token.getOffset() + 1;
-			} else {
-				return -1;
+		if (isCodeNode()) {
+			if (type == TokenTypes.IDENTIFIER || type == TokenTypes.FUNCTION) {
+				return token.getOffset();
 			}
-		} else {
-			if (type == TokenTypes.MARKUP_TAG_ATTRIBUTE_VALUE) {
-				sourceOffset = token.getOffset() + 1; // skip quote at start (")
-			} else {
-				return -1;
+			if (type == TokenTypes.ANNOTATION && token.length() > 1) {
+				return token.getOffset() + 1;
 			}
+			if (type == TokenTypes.RESERVED_WORD && token.length() == 6 && token.getLexeme().equals("static")) {
+				// maybe a class init method
+				return token.getOffset();
+			}
+		} else if (type == TokenTypes.MARKUP_TAG_ATTRIBUTE_VALUE) {
+			return token.getOffset() + 1; // skip quote at start (")
 		}
-		// fast skip
-		if (token.length() == 1) {
-			char ch = token.getTextArray()[token.getTextOffset()];
-			if (ch == '.' || ch == ',' || ch == ';') {
-				return -1;
-			}
-		}
-		return sourceOffset;
+		return -1;
 	}
 
 	/**
@@ -166,12 +270,12 @@ public final class CodeArea extends AbstractCodeArea {
 		if (foundNode == null) {
 			return null;
 		}
-		CodePosition pos = getDecompiler().getDefinitionPosition(foundNode);
-		if (pos == null) {
-			return null;
+		if (foundNode == node.getJavaNode()) {
+			// current node
+			return new JumpPosition(node);
 		}
 		JNode jNode = convertJavaNode(foundNode);
-		return new JumpPosition(jNode.getRootClass(), pos.getLine(), JumpPosition.getDefPos(jNode));
+		return new JumpPosition(jNode);
 	}
 
 	private JNode convertJavaNode(JavaNode javaNode) {
@@ -179,12 +283,41 @@ public final class CodeArea extends AbstractCodeArea {
 		return nodeCache.makeFrom(javaNode);
 	}
 
+	@Nullable
 	public JNode getNodeUnderCaret() {
-		int start = getWordStart(getCaretPosition());
+		int caretPos = getCaretPosition();
+		return getJNodeAtOffset(adjustOffsetForWordToken(caretPos));
+	}
+
+	@Nullable
+	public JNode getEnclosingNodeUnderCaret() {
+		int caretPos = getCaretPosition();
+		int start = adjustOffsetForWordToken(caretPos);
 		if (start == -1) {
-			start = getCaretPosition();
+			start = caretPos;
 		}
-		return getJNodeAtOffset(start);
+		return getEnclosingJNodeAtOffset(start);
+	}
+
+	@Nullable
+	public JNode getNodeUnderMouse() {
+		Point pos = UiUtils.getMousePosition(this);
+		return getJNodeAtOffset(adjustOffsetForWordToken(viewToModel2D(pos)));
+	}
+
+	@Nullable
+	public JNode getEnclosingNodeUnderMouse() {
+		Point pos = UiUtils.getMousePosition(this);
+		return getEnclosingJNodeAtOffset(adjustOffsetForWordToken(viewToModel2D(pos)));
+	}
+
+	@Nullable
+	public JNode getEnclosingJNodeAtOffset(int offset) {
+		JavaNode javaNode = getEnclosingJavaNode(offset);
+		if (javaNode != null) {
+			return convertJavaNode(javaNode);
+		}
+		return null;
 	}
 
 	@Nullable
@@ -199,30 +332,85 @@ public final class CodeArea extends AbstractCodeArea {
 	/**
 	 * Search referenced java node by offset in {@code jCls} code
 	 */
-	public JavaNode getJavaNodeAtOffset(int offset) {
+	public @Nullable JavaNode getJavaNodeAtOffset(int offset) {
 		if (offset == -1) {
 			return null;
 		}
 		try {
-			// TODO: add direct mapping for code offset to CodeWriter (instead of line and line offset pair)
-			int line = this.getLineOfOffset(offset);
-			int lineOffset = offset - this.getLineStartOffset(line);
-			return node.getJavaNodeAtPosition(getDecompiler(), line + 1, lineOffset + 1);
+			return getJadxWrapper().getDecompiler().getJavaNodeAtPosition(getCodeInfo(), offset);
 		} catch (Exception e) {
 			LOG.error("Can't get java node by offset: {}", offset, e);
 		}
 		return null;
 	}
 
+	public @Nullable JavaNode getClosestJavaNode(int offset) {
+		if (offset == -1) {
+			return null;
+		}
+		try {
+			return getJadxWrapper().getDecompiler().getClosestJavaNode(getCodeInfo(), offset);
+		} catch (Exception e) {
+			LOG.error("Can't get java node by offset: {}", offset, e);
+			return null;
+		}
+	}
+
+	public @Nullable JavaNode getEnclosingJavaNode(int offset) {
+		if (offset == -1) {
+			return null;
+		}
+		try {
+			return getJadxWrapper().getDecompiler().getEnclosingNode(getCodeInfo(), offset);
+		} catch (Exception e) {
+			LOG.error("Can't get java node by offset: {}", offset, e);
+			return null;
+		}
+	}
+
+	public @Nullable JavaClass getJavaClassIfAtPos(int pos) {
+		try {
+			ICodeInfo codeInfo = getCodeInfo();
+			if (!codeInfo.hasMetadata()) {
+				return null;
+			}
+			ICodeAnnotation ann = codeInfo.getCodeMetadata().getAt(pos);
+			if (ann == null) {
+				return null;
+			}
+			switch (ann.getAnnType()) {
+				case CLASS:
+					return (JavaClass) getJadxWrapper().getDecompiler().getJavaNodeByCodeAnnotation(codeInfo, ann);
+				case METHOD:
+					// use class from constructor call
+					JavaNode node = getJadxWrapper().getDecompiler().getJavaNodeByCodeAnnotation(codeInfo, ann);
+					return node != null ? node.getDeclaringClass() : null;
+				default:
+					return null;
+			}
+		} catch (Exception e) {
+			LOG.error("Can't get java node by offset: {}", pos, e);
+			return null;
+		}
+	}
+
 	public void refreshClass() {
+		refreshClass(false);
+	}
+
+	public void refreshClass(boolean alreadyReloaded) {
 		if (node instanceof JClass) {
-			JClass cls = (JClass) node;
+			JClass cls = node.getRootClass();
 			try {
 				CaretPositionFix caretFix = new CaretPositionFix(this);
 				caretFix.save();
 
-				cls.reload();
-				IndexJob.refreshIndex(getMainWindow().getCacheObject(), cls.getCls());
+				if (alreadyReloaded) {
+					cachedCodeInfo = cls.getCodeInfo();
+				} else {
+					// bad. blocks the UI thread for a potentially expensive decomp
+					cachedCodeInfo = cls.reload(getMainWindow().getCacheObject());
+				}
 
 				ClassCodeContentPanel codeContentPanel = (ClassCodeContentPanel) this.contentPanel;
 				codeContentPanel.getTabbedPane().refresh(cls);
@@ -233,15 +421,107 @@ public final class CodeArea extends AbstractCodeArea {
 		}
 	}
 
-	public MainWindow getMainWindow() {
-		return contentPanel.getTabbedPane().getMainWindow();
+	/**
+	 * Refresh the class in the background, updating the UI once the potential decomp is complete.
+	 * Should be called from the UI thread.
+	 */
+	public void backgroundRefreshClass() {
+		UiUtils.uiThreadGuard();
+		this.getMainWindow().getBackgroundExecutor().execute("Refreshing...", () -> {
+			this.getNode().getRootClass().reload(this.getMainWindow().getCacheObject());
+			UiUtils.uiRunAndWait(() -> {
+				this.refreshClass(true);
+			});
+		});
 	}
 
-	public JadxDecompiler getDecompiler() {
-		return getMainWindow().getWrapper().getDecompiler();
+	public MainWindow getMainWindow() {
+		return contentPanel.getMainWindow();
+	}
+
+	public JadxWrapper getJadxWrapper() {
+		return getMainWindow().getWrapper();
 	}
 
 	public JadxProject getProject() {
 		return getMainWindow().getProject();
+	}
+
+	@Override
+	public void dispose() {
+		shortcutsController.unbindActionsForComponent(this);
+
+		super.dispose();
+		cachedCodeInfo = null;
+	}
+
+	@Override
+	public CodeAreaSyncer createCodeAreaSyncer() {
+		return new JavaSyncer(this);
+	}
+
+	@Override
+	public boolean sync(CodeAreaSyncer codeAreaSyncer) {
+		return codeAreaSyncer.syncTo(this);
+	}
+
+	public @Nullable ICodeMetadata getCodeMetadata() {
+		ICodeInfo codeInfo = getCodeInfo();
+		if (!codeInfo.hasMetadata()) {
+			LOG.warn("No code info metadata for {}", codeInfo);
+			return null;
+		}
+		return codeInfo.getCodeMetadata();
+	}
+
+	/**
+	 * Returns a mapping of 'decompilation output line number' to 'dex debug line number'
+	 * These are 1-indexed line numbers not the line indices of the CodeArea
+	 *
+	 * @return the line mapping
+	 */
+	public Map<Integer, Integer> getLineMappings() {
+		ICodeInfo codeInfo = getCodeInfo();
+		if (!codeInfo.hasMetadata()) {
+			LOG.debug("No code info metadata for {}", codeInfo);
+			return Collections.emptyMap();
+		}
+		Map<Integer, Integer> lineMapping = codeInfo.getCodeMetadata().getLineMapping();
+		if (lineMapping.isEmpty()) {
+			LOG.debug("Line mappings are empty for {}", codeInfo);
+			return Collections.emptyMap();
+		}
+		return lineMapping;
+	}
+
+	private Map<Integer, Integer> cachedUniqueLineMappings;
+
+	/**
+	 * Returns the same as {@link #getLineMappings()} but only if each value (dex debug line number)
+	 * appears only once.
+	 * If a value appears more than once then it suggests that methods might share dex debug line
+	 * numbers.
+	 * If this is the case then the line mapping cannot be used for code sync correlation.
+	 */
+	public Map<Integer, Integer> getFunctionUniqueLineMappings() {
+		Map<Integer, Integer> mappings = cachedUniqueLineMappings;
+		if (mappings == null) {
+			mappings = calcUniqueLineMappings();
+			cachedUniqueLineMappings = mappings;
+		}
+		return mappings;
+	}
+
+	private @NotNull Map<Integer, Integer> calcUniqueLineMappings() {
+		Map<Integer, Integer> lineMappings = getLineMappings();
+		boolean isAnyRepeated = lineMappings.values().stream()
+				.collect(Collectors.groupingBy(Function.identity(), Collectors.counting()))
+				.values().stream()
+				.anyMatch(v -> v > 1);
+		if (isAnyRepeated) {
+			LOG.debug("Dex debug line mappings are not unique");
+			return Collections.emptyMap();
+		}
+		return lineMappings;
 	}
 }

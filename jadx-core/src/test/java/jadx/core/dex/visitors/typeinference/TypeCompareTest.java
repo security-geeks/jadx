@@ -14,7 +14,6 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.ArgType.WildcardBound;
 import jadx.core.dex.nodes.RootNode;
 
-import static jadx.core.dex.instructions.args.ArgType.BOOLEAN;
 import static jadx.core.dex.instructions.args.ArgType.BYTE;
 import static jadx.core.dex.instructions.args.ArgType.CHAR;
 import static jadx.core.dex.instructions.args.ArgType.CLASS;
@@ -23,7 +22,6 @@ import static jadx.core.dex.instructions.args.ArgType.INT;
 import static jadx.core.dex.instructions.args.ArgType.NARROW;
 import static jadx.core.dex.instructions.args.ArgType.NARROW_INTEGRAL;
 import static jadx.core.dex.instructions.args.ArgType.OBJECT;
-import static jadx.core.dex.instructions.args.ArgType.SHORT;
 import static jadx.core.dex.instructions.args.ArgType.STRING;
 import static jadx.core.dex.instructions.args.ArgType.THROWABLE;
 import static jadx.core.dex.instructions.args.ArgType.UNKNOWN;
@@ -34,7 +32,7 @@ import static jadx.core.dex.instructions.args.ArgType.generic;
 import static jadx.core.dex.instructions.args.ArgType.genericType;
 import static jadx.core.dex.instructions.args.ArgType.object;
 import static jadx.core.dex.instructions.args.ArgType.wildcard;
-import static org.assertj.core.api.Assertions.assertThat;
+import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 @ExtendWith(NotYetImplementedExtension.class)
 public class TypeCompareTest {
@@ -53,21 +51,14 @@ public class TypeCompareTest {
 
 	@Test
 	public void compareTypes() {
+		check(INT, UNKNOWN_OBJECT, TypeCompareEnum.CONFLICT);
+		check(INT, OBJECT, TypeCompareEnum.CONFLICT);
+
 		firstIsNarrow(INT, UNKNOWN);
+		firstIsNarrow(CHAR, NARROW_INTEGRAL);
 
 		firstIsNarrow(array(UNKNOWN), UNKNOWN);
 		firstIsNarrow(array(UNKNOWN), NARROW);
-	}
-
-	@Test
-	public void comparePrimitives() {
-		check(INT, UNKNOWN_OBJECT, TypeCompareEnum.CONFLICT);
-		check(INT, OBJECT, TypeCompareEnum.CONFLICT);
-		check(INT, BOOLEAN, TypeCompareEnum.CONFLICT);
-		check(INT, CHAR, TypeCompareEnum.WIDER);
-		check(INT, SHORT, TypeCompareEnum.WIDER);
-
-		firstIsNarrow(CHAR, NARROW_INTEGRAL);
 		firstIsNarrow(array(CHAR), UNKNOWN_OBJECT);
 	}
 
@@ -135,10 +126,20 @@ public class TypeCompareTest {
 	}
 
 	@Test
+	public void compareGenericWildCards() {
+		// 'java.util.List<T>' and 'java.util.List<? extends T>'
+		ArgType listCls = object("java.util.List");
+		ArgType genericType = genericType("T");
+		ArgType genericList = generic(listCls, genericType);
+		ArgType genericExtendedList = generic(listCls, wildcard(genericType, WildcardBound.EXTENDS));
+		check(genericList, genericExtendedList, TypeCompareEnum.CONFLICT_BY_GENERIC);
+	}
+
+	@Test
 	public void compareGenericTypes() {
 		ArgType vType = genericType("V");
 		check(vType, OBJECT, TypeCompareEnum.NARROW);
-		check(vType, STRING, TypeCompareEnum.NARROW);
+		check(vType, STRING, TypeCompareEnum.CONFLICT);
 
 		ArgType rType = genericType("R");
 		check(vType, rType, TypeCompareEnum.CONFLICT);

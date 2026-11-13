@@ -1,6 +1,6 @@
 package jadx.gui.treemodel;
 
-import javax.swing.*;
+import javax.swing.Icon;
 
 import jadx.core.utils.StringUtils;
 
@@ -8,13 +8,11 @@ public class JResSearchNode extends JNode {
 	private static final long serialVersionUID = -2222084945157778639L;
 	private final transient JResource resNode;
 	private final transient String text;
-	private final transient int line;
 	private final transient int pos;
 
-	public JResSearchNode(JResource resNode, String text, int line, int pos) {
+	public JResSearchNode(JResource resNode, String text, int pos) {
 		this.pos = pos;
 		this.text = text;
-		this.line = line;
 		this.resNode = resNode;
 	}
 
@@ -37,21 +35,6 @@ public class JResSearchNode extends JNode {
 	}
 
 	@Override
-	public int getLine() {
-		return line;
-	}
-
-	@Override
-	public String makeLongStringHtml() {
-		return getName();
-	}
-
-	@Override
-	public Icon getIcon() {
-		return resNode.getIcon();
-	}
-
-	@Override
 	public String getName() {
 		return resNode.getName();
 	}
@@ -59,6 +42,31 @@ public class JResSearchNode extends JNode {
 	@Override
 	public String makeString() {
 		return resNode.makeString();
+	}
+
+	@Override
+	public String makeLongString() {
+		return resNode.makeLongString();
+	}
+
+	@Override
+	public String makeLongStringHtml() {
+		return resNode.makeLongStringHtml();
+	}
+
+	@Override
+	public String getTooltip() {
+		return resNode.getTooltip();
+	}
+
+	@Override
+	public boolean disableHtml() {
+		return resNode.disableHtml();
+	}
+
+	@Override
+	public Icon getIcon() {
+		return resNode.getIcon();
 	}
 
 	@Override
